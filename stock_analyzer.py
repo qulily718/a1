@@ -11,6 +11,31 @@ import warnings
 import time
 warnings.filterwarnings('ignore')
 
+# 导入速率限制器
+try:
+    from rate_limiter import akshare_limiter, yfinance_limiter
+    RATE_LIMITER_AVAILABLE = True
+except ImportError:
+    RATE_LIMITER_AVAILABLE = False
+    # 如果没有速率限制器，使用简单的延迟
+    class SimpleLimiter:
+        def wait_if_needed(self):
+            time.sleep(0.1)  # 默认0.1秒延迟
+        def record_success(self):
+            pass
+        def record_error(self, error_type=""):
+            pass
+    
+    akshare_limiter = SimpleLimiter()
+    yfinance_limiter = SimpleLimiter()
+
+# 导入数据源管理器（负载均衡）
+try:
+    from data_source_manager import get_data_source_manager
+    DATA_SOURCE_MANAGER_AVAILABLE = True
+except ImportError:
+    DATA_SOURCE_MANAGER_AVAILABLE = False
+
 # 尝试导入akshare（用于A股数据）
 try:
     import akshare as ak
@@ -117,6 +142,12 @@ def get_all_a_stock_list() -> pd.DataFrame:
         # 添加市场后缀
         result['symbol'] = result['code'].apply(lambda x: f"{x}.SS" if str(x).startswith('6') else f"{x}.SZ")
         
+        # 保留A股、ETF/基金和B股
+        # A股：0、3、6开头（6位数字）
+        # ETF/基金：15、16、51开头（6位数字）
+        # B股：9开头（6位数字）
+        result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$|^9\d{5}$')]
+        
         return result[['symbol', 'code', 'name']]
     except Exception as e:
         print(f"获取A股列表失败: {e}")
@@ -133,6 +164,12 @@ def get_all_a_stock_list() -> pd.DataFrame:
                 result['name'] = df['name']
             
             result['symbol'] = result['code'].apply(lambda x: f"{x}.SS" if str(x).startswith('6') else f"{x}.SZ")
+            
+            # 保留A股、ETF/基金和B股
+            # A股：0、3、6开头（6位数字）
+            # ETF/基金：15、16、51开头（6位数字）
+            # B股：9开头（6位数字）
+            result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$|^9\d{5}$')]
             
             return result[['symbol', 'code', 'name']]
         except Exception as e2:
@@ -157,8 +194,38 @@ class StockAnalyzer:
         self.data = None
         
     def _is_china_stock(self, symbol: str) -> bool:
-        """判断是否为中国股票"""
-        return '.SS' in symbol or '.SZ' in symbol or (len(symbol) == 6 and symbol.isdigit())
+        """判断是否为中国股票（A股）"""
+        if '.SS' in symbol or '.SZ' in symbol:
+            # 提取代码部分
+            code = symbol.replace('.SS', '').replace('.SZ', '')
+            # A股代码：0、3、6开头（排除9开头的B股）
+            if len(code) == 6 and code.isdigit():
+                return code.startswith(('0', '3', '6'))
+        return False
+    
+    def _is_china_b_stock(self, symbol: str) -> bool:
+        """判断是否为中国B股（9开头）"""
+        if '.SS' in symbol or '.SZ' in symbol:
+            code = symbol.replace('.SS', '').replace('.SZ', '')
+            if len(code) == 6 and code.isdigit():
+                return code.startswith('9')
+        return False
+    
+    def _is_etf_or_fund(self, symbol: str) -> bool:
+        """判断是否为ETF或基金（15、16、51开头）"""
+        if '.SS' in symbol or '.SZ' in symbol:
+            code = symbol.replace('.SS', '').replace('.SZ', '')
+            if len(code) == 6 and code.isdigit():
+                # 15开头：ETF
+                # 16开头：基金
+                # 51开头：ETF（上海）
+                return code.startswith(('15', '16', '51'))
+        return False
+    
+    def _is_supported_stock(self, symbol: str) -> bool:
+        """判断是否为支持的股票类型（A股，排除B股、ETF、基金等）"""
+        # 只支持A股（0、3、6开头）
+        return self._is_china_stock(symbol)
     
     def _convert_period_to_days(self, period: str) -> int:
         """将周期转换为天数"""
@@ -198,10 +265,13 @@ class StockAnalyzer:
                 
                 # 获取历史数据
                 days = self._convert_period_to_days(self.period)
+                
+                # 使用今天的日期作为end_date（akshare会自动返回最近的交易日数据）
+                # 如果今天是周末或节假日，akshare会返回上一个交易日的数据
                 end_date = datetime.now().strftime('%Y%m%d')
                 start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
                 
-                # 使用akshare获取数据
+                # 使用akshare获取数据（会自动获取到最新的交易日数据）
                 df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 
                 if df is None or df.empty:
@@ -343,15 +413,45 @@ class StockAnalyzer:
         Returns:
             bool: 是否成功获取数据
         """
-        # 如果是A股，先尝试使用akshare
-        if self._is_china_stock(self.symbol):
-            akshare_data = self._fetch_akshare_data(self.symbol)
-            if akshare_data is not None and not akshare_data.empty:
-                self.data = akshare_data
-                self.stock = None  # akshare不需要yfinance的Ticker对象
-                return True
+        # 不再过滤B股，支持B股数据获取
         
-        # 尝试使用yfinance（带重试机制）
+        # 如果是A股、ETF/基金或B股，使用数据源管理器（负载均衡）
+        is_a_stock = self._is_china_stock(self.symbol)
+        is_etf_fund = self._is_etf_or_fund(self.symbol)
+        is_b_stock = self._is_china_b_stock(self.symbol)
+        
+        if is_a_stock or is_etf_fund or is_b_stock:
+            # 使用数据源管理器，优先akshare，失败后自动尝试其他数据源（包括baostock）
+            if DATA_SOURCE_MANAGER_AVAILABLE:
+                manager = get_data_source_manager()
+                # 对于A股，优先使用akshare
+                # 对于B股和ETF/基金，不指定首选，让管理器自动选择（B股优先使用baostock）
+                preferred = 'akshare' if is_a_stock else ('baostock' if is_b_stock else None)
+                df = manager.get_data(self.symbol, self.period, preferred_source=preferred)
+                
+                if df is not None and not df.empty:
+                    self.data = df
+                    self.stock = None
+                    return True
+                else:
+                    # 数据源管理器已尝试所有可用数据源（akshare -> baostock -> yfinance）
+                    # 如果都失败，直接返回False，不再尝试yfinance（避免速率限制）
+                    print(f"⚠️ {self.symbol} 所有数据源（akshare/baostock/yfinance）获取失败")
+                    return False
+            else:
+                # 如果没有数据源管理器，使用原来的方法
+                # 对于B股，akshare可能不支持，直接跳过
+                if not is_b_stock:
+                    akshare_data = self._fetch_akshare_data(self.symbol)
+                    if akshare_data is not None and not akshare_data.empty:
+                        self.data = akshare_data
+                        self.stock = None
+                        return True
+                # 如果没有数据源管理器且是B股，直接返回False（避免使用yfinance）
+                print(f"⚠️ {self.symbol} 数据源管理器不可用，且无法使用akshare")
+                return False
+        
+        # 尝试使用yfinance（仅用于非A股、非B股、非ETF/基金，如美股等，带重试机制）
         max_retries = 3
         retry_delay = 2  # 秒
         
@@ -397,20 +497,25 @@ class StockAnalyzer:
                 error_msg = str(e)
                 print(f"yfinance获取数据失败 (尝试 {attempt + 1}/{max_retries}): {e}")
                 
-                # 如果是速率限制错误，等待后重试
+                # 如果是速率限制错误，等待后重试（增加等待时间）
                 if "Rate limited" in error_msg or "Too Many Requests" in error_msg:
                     if attempt < max_retries - 1:
-                        print(f"遇到速率限制，等待 {retry_delay * (attempt + 1)} 秒后重试...")
-                        time.sleep(retry_delay * (attempt + 1))
+                        wait_time = retry_delay * (attempt + 1) * 2  # 增加等待时间：4秒、8秒、12秒
+                        print(f"遇到速率限制，等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
                         continue
-                
-                # 最后一次尝试失败，如果是A股，尝试akshare
-                if attempt == max_retries - 1 and self._is_china_stock(self.symbol):
-                    akshare_data = self._fetch_akshare_data(self.symbol)
-                    if akshare_data is not None and not akshare_data.empty:
-                        self.data = akshare_data
-                        self.stock = None
-                        return True
+                    else:
+                        # 最后一次重试也失败，如果是A股，尝试akshare
+                        if self._is_china_stock(self.symbol):
+                            print(f"yfinance速率限制，尝试使用akshare获取A股数据...")
+                            akshare_data = self._fetch_akshare_data(self.symbol)
+                            if akshare_data is not None and not akshare_data.empty:
+                                self.data = akshare_data
+                                self.stock = None
+                                return True
+                        # 如果是B股或非A股，直接返回False（避免无限重试）
+                        print(f"yfinance速率限制，无法获取数据（可能是B股或非A股）")
+                        return False
                 
                 # 如果不是速率限制错误，直接返回False
                 if "Rate limited" not in error_msg and "Too Many Requests" not in error_msg:

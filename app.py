@@ -7,10 +7,12 @@ from plotly.subplots import make_subplots
 import pandas as pd
 from stock_analyzer import StockAnalyzer, get_all_a_stock_list, get_stocks_by_sectors
 from market_analyzer import MarketAnalyzer, TrendStartSignalDetector
+from scan_cache import ScanCache
 from datetime import datetime
 import time
 import signal
 import sys
+import os
 
 # 页面配置
 st.set_page_config(
@@ -259,13 +261,39 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
     """扫描趋势启动信号（3-5日策略）"""
     st.subheader("🚀 趋势启动信号扫描（3-5日策略）")
     
-    # 第一步：分析市场环境
+    # 初始化扫描缓存
+    scan_cache = ScanCache()
+    
+    # 第一步：分析市场环境（一天只分析一次，结果保存到文件）
     st.markdown("### 📊 第一步：市场环境分析")
     
-    market_analyzer = MarketAnalyzer()
+    # 检查是否有今天的分析结果文件（即使重启应用也能读取）
+    market_env = scan_cache.get_market_environment()
     
-    with st.spinner("正在分析市场环境..."):
-        market_env = market_analyzer.analyze_market_environment()
+    if market_env is None:
+        # 没有文件记录，需要分析
+        market_analyzer = MarketAnalyzer()
+        
+        with st.spinner("正在分析市场环境（首次分析，可能需要一些时间）..."):
+            market_env = market_analyzer.analyze_market_environment()
+        
+        # 保存分析结果到文件（持久化存储，重启应用后仍可用）
+        if market_env:
+            scan_cache.save_market_environment(market_env)
+            st.success("✅ 市场环境分析完成，结果已保存到文件（今天不再重复分析，重启应用后仍可用）")
+    else:
+        # 使用文件中的分析结果（即使重启应用也能读取）
+        st.info(f"📋 使用已保存的市场环境分析结果（分析时间：{market_env.get('timestamp', '未知')}，重启应用后仍可用）")
+        
+        # 提供重新分析按钮
+        if st.button("🔄 重新分析市场环境", help="强制重新分析市场环境（会覆盖缓存）"):
+            scan_cache.clear_market_environment_cache()
+            market_analyzer = MarketAnalyzer()
+            with st.spinner("正在重新分析市场环境..."):
+                market_env = market_analyzer.analyze_market_environment()
+            if market_env:
+                scan_cache.save_market_environment(market_env)
+            st.rerun()
     
     # 显示市场环境
     col1, col2, col3 = st.columns(3)
@@ -294,61 +322,68 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             st.dataframe(sector_df, hide_index=True, width='stretch')
     
     # 显示详细得分明细表（诊断功能）
-    if 'sector_details_df' in market_env and not market_env['sector_details_df'].empty:
-        with st.expander("🔍 板块强度得分明细表（诊断功能）", expanded=False):
-            st.markdown("""
-            **说明：** 此表显示每个板块的综合得分构成，帮助诊断算法判断是否合理。
-            - **5日贡献/10日贡献/20日贡献**：各期涨跌幅的得分贡献
-            - **资金贡献**：资金流向的得分贡献（权重30%）
-            - **成交量贡献**：成交量因子的得分贡献
-            - **趋势贡献**：长期趋势健康度的得分贡献
-            - **基础调整**：板块逻辑合理性调整分（如房地产板块会扣除3分）
-            
-            **诊断要点：**
-            - 如果某个板块的高分主要来自5日涨幅，可能是短期脉冲，需谨慎
-            - 如果资金贡献为负或很小，但综合得分高，可能存在偏差
-            - 如果基础调整为负（如房地产-3.0），说明算法已识别并降权
-            """)
-            
-            detail_df = market_env['sector_details_df'].copy()
-            
-            # 高亮显示关键列
-            st.dataframe(
-                detail_df.style.format({
-                    '综合得分': '{:.2f}',
-                    '5日涨幅(%)': '{:.2f}',
-                    '5日贡献': '{:.2f}',
-                    '10日涨幅(%)': '{:.2f}',
-                    '10日贡献': '{:.2f}',
-                    '20日涨幅(%)': '{:.2f}',
-                    '20日贡献': '{:.2f}',
-                    '资金流向得分': '{:.2f}',
-                    '资金贡献': '{:.2f}',
-                    '成交量因子': '{:.2f}',
-                    '成交量贡献': '{:.2f}',
-                    '趋势健康度': '{:.1f}',
-                    '趋势贡献': '{:.2f}',
-                    '基础调整': '{:.2f}',
-                }).background_gradient(subset=['综合得分'], cmap='RdYlGn'),
-                hide_index=True,
-                width='stretch',
-                height=400
-            )
-            
-            # 添加筛选功能
-            st.markdown("#### 🔎 筛选特定板块")
-            search_sector = st.text_input("输入板块名称（支持模糊搜索）", "")
-            if search_sector:
-                filtered_df = detail_df[detail_df['板块名称'].str.contains(search_sector, case=False, na=False)]
-                if not filtered_df.empty:
-                    st.dataframe(filtered_df, hide_index=True, width='stretch')
-                else:
-                    st.info(f"未找到包含 '{search_sector}' 的板块")
+    if 'sector_details_df' in market_env:
+        # 确保sector_details_df是DataFrame且不为空
+        if isinstance(market_env['sector_details_df'], pd.DataFrame) and not market_env['sector_details_df'].empty:
+            with st.expander("🔍 板块强度得分明细表（诊断功能）", expanded=False):
+                st.markdown("""
+                **说明：** 此表显示每个板块的综合得分构成，帮助诊断算法判断是否合理。
+                - **5日贡献/10日贡献/20日贡献**：各期涨跌幅的得分贡献
+                - **资金贡献**：资金流向的得分贡献（权重30%）
+                - **成交量贡献**：成交量因子的得分贡献
+                - **趋势贡献**：长期趋势健康度的得分贡献
+                - **基础调整**：板块逻辑合理性调整分（如房地产板块会扣除3分）
+                
+                **诊断要点：**
+                - 如果某个板块的高分主要来自5日涨幅，可能是短期脉冲，需谨慎
+                - 如果资金贡献为负或很小，但综合得分高，可能存在偏差
+                - 如果基础调整为负（如房地产-3.0），说明算法已识别并降权
+                """)
+                
+                detail_df = market_env['sector_details_df'].copy()
+                
+                # 高亮显示关键列
+                st.dataframe(
+                    detail_df.style.format({
+                        '综合得分': '{:.2f}',
+                        '5日涨幅(%)': '{:.2f}',
+                        '5日贡献': '{:.2f}',
+                        '10日涨幅(%)': '{:.2f}',
+                        '10日贡献': '{:.2f}',
+                        '20日涨幅(%)': '{:.2f}',
+                        '20日贡献': '{:.2f}',
+                        '资金流向得分': '{:.2f}',
+                        '资金贡献': '{:.2f}',
+                        '成交量因子': '{:.2f}',
+                        '成交量贡献': '{:.2f}',
+                        '趋势健康度': '{:.1f}',
+                        '趋势贡献': '{:.2f}',
+                        '基础调整': '{:.2f}',
+                    }).background_gradient(subset=['综合得分'], cmap='RdYlGn'),
+                    hide_index=True,
+                    width='stretch',
+                    height=400
+                )
+                
+                # 添加筛选功能
+                st.markdown("#### 🔎 筛选特定板块")
+                search_sector = st.text_input("输入板块名称（支持模糊搜索）", "")
+                if search_sector:
+                    filtered_df = detail_df[detail_df['板块名称'].str.contains(search_sector, case=False, na=False)]
+                    if not filtered_df.empty:
+                        st.dataframe(filtered_df, hide_index=True, width='stretch')
+                    else:
+                        st.info(f"未找到包含 '{search_sector}' 的板块")
     
     st.markdown("---")
     
     # 第二步：在强势板块中扫描个股
     st.markdown("### 🔍 第二步：扫描趋势启动信号")
+    
+    # 初始化实时结果文件路径
+    today = datetime.now().strftime('%Y%m%d')
+    realtime_results_file = os.path.join("scan_results", f"trend_start_signal_realtime_{today}.txt")
+    os.makedirs("scan_results", exist_ok=True)
     
     # 获取强势板块的股票列表
     strong_sector_names = [s[0] for s in market_env['strong_sectors']]
@@ -357,7 +392,9 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
     if 'trend_scanning' not in st.session_state:
         st.session_state.trend_scanning = False
     if 'trend_results' not in st.session_state:
-        st.session_state.trend_results = []
+        # 尝试从缓存加载今天已扫描的结果
+        cached_results = scan_cache.get_cached_results('trend_start_signal')
+        st.session_state.trend_results = cached_results if cached_results else []
     if 'trend_logs' not in st.session_state:
         st.session_state.trend_logs = []
     if 'trend_index' not in st.session_state:
@@ -371,6 +408,11 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             'passed_indicator': 0,
             'final_passed': 0
         }
+    
+    # 显示缓存统计信息
+    cache_stats = scan_cache.get_cache_stats('trend_start_signal')
+    if cache_stats['scanned_count'] > 0:
+        st.info(f"📋 今天已扫描 {cache_stats['scanned_count']} 只股票，已缓存 {cache_stats['cached_results_count']} 个结果")
     
     # 获取强势板块中的股票列表（只在第一次或需要重新获取时）
     if 'trend_filtered_stocks' not in st.session_state or st.session_state.trend_filtered_stocks is None or st.session_state.trend_filtered_stocks.empty:
@@ -392,7 +434,19 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
                     filtered_stocks = get_all_a_stock_list()
                     st.info(f"📋 备选方案：使用全部A股，共 {len(filtered_stocks)} 只")
                 else:
+                    # 先保存原始股票列表（用于统计）
+                    st.session_state.trend_total_stocks = len(filtered_stocks)
+                    
+                    # 获取今天已扫描的股票列表
+                    scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+                    scanned_count = len(scanned_stocks) if scanned_stocks else 0
+                    pending_count = len(filtered_stocks) - scanned_count
+                    
                     st.success(f"✅ 成功获取 {len(filtered_stocks)} 只强势板块股票")
+                    if scanned_count > 0:
+                        st.info(f"📊 其中 {scanned_count} 只已扫描，{pending_count} 只股票待扫描")
+                    else:
+                        st.info(f"📊 全部 {len(filtered_stocks)} 只股票待扫描")
                     st.info(f"💡 提示：趋势启动信号条件严格，可能只有少数股票符合条件")
                     
                     # 显示板块来源信息（用于验证）
@@ -408,9 +462,26 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
                         如果数量接近全部A股，可能是API调用失败，已回退到全部A股。
                         """)
             
-            # 限制扫描数量
-            if len(filtered_stocks) > max_stocks:
+            # 获取今天已扫描的股票列表（在过滤前先统计）
+            scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+            total_stocks_before_filter = len(filtered_stocks)
+            scanned_count = len(scanned_stocks) if scanned_stocks else 0
+            
+            # 过滤掉已扫描的股票
+            if scanned_stocks:
+                filtered_stocks = filtered_stocks[~filtered_stocks['symbol'].isin(scanned_stocks)]
+            
+            pending_count = len(filtered_stocks)
+            
+            # 限制扫描数量（如果max_stocks > 0，否则扫描全部）
+            if max_stocks > 0 and pending_count > max_stocks:
                 filtered_stocks = filtered_stocks.head(max_stocks)
+                st.info(f"📊 限制扫描数量为 {max_stocks} 只（共 {pending_count} 只待扫描股票）")
+            else:
+                if scanned_count > 0:
+                    st.info(f"📊 将扫描 {pending_count} 只待扫描股票（共 {total_stocks_before_filter} 只，已扫描 {scanned_count} 只）")
+                else:
+                    st.info(f"📊 将扫描全部 {pending_count} 只强势板块股票")
             
             # 保存到session_state
             st.session_state.trend_filtered_stocks = filtered_stocks
@@ -419,19 +490,42 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
         filtered_stocks = st.session_state.trend_filtered_stocks
     
     if filtered_stocks.empty:
-        st.error("无法获取股票列表")
+        # 检查是否是因为全部已扫描
+        scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+        total_stocks = st.session_state.get('trend_total_stocks', 0)
+        if scanned_stocks and len(scanned_stocks) > 0 and total_stocks > 0:
+            st.warning(f"⚠️ 全部股票已扫描完成（共 {total_stocks} 只，已扫描 {len(scanned_stocks)} 只）")
+            st.info("💡 如需重新扫描，请点击下方的「清理当日扫描记录」按钮")
+        else:
+            st.error("无法获取股票列表")
         return
     
-    st.info(f"📈 将在 {len(filtered_stocks)} 只强势板块股票中扫描趋势启动信号")
+    # 显示扫描统计信息（每次rerun时重新读取，确保显示最新数据）
+    scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+    scanned_count = len(scanned_stocks) if scanned_stocks else 0
+    total_stocks = st.session_state.get('trend_total_stocks', len(filtered_stocks))
+    pending_count = len(filtered_stocks)
+    
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
+    with col_stat1:
+        st.metric("总股票数", f"{total_stocks} 只")
+    with col_stat2:
+        st.metric("已扫描", f"{scanned_count} 只", delta=f"{scanned_count/total_stocks*100:.1f}%" if total_stocks > 0 else "0%")
+    with col_stat3:
+        st.metric("待扫描", f"{pending_count} 只", delta=f"{pending_count/total_stocks*100:.1f}%" if total_stocks > 0 else "0%")
+    
+    # 显示实时结果文件路径
+    st.info(f"💾 扫描结果将实时保存到: `scan_results/trend_start_signal_realtime_{today}.txt`")
     
     # 控制按钮
-    col_btn1, col_btn2 = st.columns(2)
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
     with col_btn1:
         if not st.session_state.trend_scanning:
             if st.button("🚀 开始扫描", type="primary", use_container_width=True):
                 st.session_state.trend_scanning = True
-                st.session_state.trend_results = []
-                st.session_state.trend_logs = []
+                # 不清空已有结果，继续追加（这样可以看到之前扫描的结果）
+                # st.session_state.trend_results = []
+                # st.session_state.trend_logs = []
                 st.session_state.trend_index = 0
                 st.rerun()
         else:
@@ -441,6 +535,22 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
         if st.session_state.trend_scanning:
             if st.button("⏸️ 停止扫描", use_container_width=True):
                 st.session_state.trend_scanning = False
+                st.rerun()
+        else:
+            if st.button("🔄 清理当日扫描记录", help="清除今天的扫描记录，可以重新扫描全部股票", use_container_width=True):
+                scan_cache.clear_today_cache('trend_start_signal')
+                # 清除session_state中的相关数据
+                if 'trend_filtered_stocks' in st.session_state:
+                    del st.session_state.trend_filtered_stocks
+                if 'trend_total_stocks' in st.session_state:
+                    del st.session_state.trend_total_stocks
+                if 'trend_results' in st.session_state:
+                    st.session_state.trend_results = []
+                if 'trend_logs' in st.session_state:
+                    st.session_state.trend_logs = []
+                if 'trend_index' in st.session_state:
+                    st.session_state.trend_index = 0
+                st.success("✅ 已清理当日扫描记录，可以重新扫描全部股票")
                 st.rerun()
     
     st.markdown("---")
@@ -481,8 +591,20 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             progress = (current_index + 1) / len(filtered_stocks)
             progress_placeholder.progress(progress, text=f"进度: {current_index + 1}/{len(filtered_stocks)} ({progress*100:.1f}%)")
             
-            # 分析股票
+            # 检查是否已扫描过（从缓存，每次rerun时重新读取，确保获取最新数据）
+            current_scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+            if symbol in current_scanned_stocks:
+                # 已扫描过，跳过
+                st.session_state.trend_index = current_index + 1
+                time.sleep(0.01)  # 减少延迟
+                st.rerun()
+                return
+            
+            # 分析股票（添加小延迟，避免请求过快）
             try:
+                # 在扫描循环中添加延迟，避免请求过快
+                time.sleep(0.02)  # 20毫秒延迟，给API一些缓冲时间
+                
                 analyzer = StockAnalyzer(symbol, period)
                 if analyzer.fetch_data():
                     df = analyzer.calculate_indicators()
@@ -512,6 +634,8 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
                     else:
                         st.session_state.trend_stats['final_passed'] += 1
                     
+                    # 保存结果到缓存
+                    result = None
                     if is_signal:
                         info = analyzer.get_current_info()
                         result = {
@@ -530,9 +654,33 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
                         
                         log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {name}: 趋势启动信号"
                         st.session_state.trend_logs.append(log_msg)
+                        
+                        # 实时写入txt文件
+                        try:
+                            with open(realtime_results_file, 'a', encoding='utf-8') as f:
+                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                f.write(f"\n{'='*80}\n")
+                                f.write(f"时间: {timestamp}\n")
+                                f.write(f"股票代码: {symbol}\n")
+                                f.write(f"股票名称: {name}\n")
+                                f.write(f"当前价格: {info.get('current_price', 0):.2f}\n")
+                                f.write(f"涨跌幅: {info.get('change_percent', 0):.2f}%\n")
+                                f.write(f"信号强度: {details.get('signal_strength', 85)}%\n")
+                                f.write(f"止损位: {details.get('stop_loss', 0):.2f}\n")
+                                f.write(f"启动理由: {details.get('启动理由', reason)}\n")
+                                f.write(f"{'='*80}\n")
+                                f.flush()  # 立即刷新到磁盘
+                        except Exception as e:
+                            print(f"写入实时结果文件失败: {e}")
+                    
+                    # 保存到缓存（无论是否有信号都保存，避免重复扫描）
+                    scan_cache.add_scanned_stock('trend_start_signal', symbol, result)
+                    
             except Exception as e:
-                log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {name} 分析失败"
+                log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {name} 分析失败: {str(e)[:30]}"
                 st.session_state.trend_logs.append(log_msg)
+                # 即使失败也记录到缓存，避免重复尝试（但可以设置重试次数）
+                scan_cache.add_scanned_stock('trend_start_signal', symbol, None)
             
             st.session_state.trend_index = current_index + 1
             
@@ -560,8 +708,8 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
                     for log in reversed(st.session_state.trend_logs[-10:]):
                         st.text(log)
             
-            # 继续扫描
-            time.sleep(0.05)
+            # 继续扫描（减少延迟以提高速度）
+            time.sleep(0.02)  # 从0.05秒减少到0.02秒
             st.rerun()
         else:
             # 扫描完成
@@ -575,6 +723,13 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             
             if st.session_state.trend_results:
                 st.success(f"✅ 扫描完成！找到 {len(st.session_state.trend_results)} 只趋势启动信号股票")
+                
+                # 保存到文件（供验证程序使用）
+                try:
+                    scan_cache.save_daily_results('trend_start_signal', st.session_state.trend_results)
+                    st.info("💾 扫描结果已自动保存到 `scan_results/` 目录")
+                except Exception as e:
+                    st.warning(f"⚠️ 保存结果文件失败: {e}")
                 
                 # 下载按钮（只在有结果时显示）
                 df_results = pd.DataFrame(st.session_state.trend_results)
@@ -674,6 +829,9 @@ def update_trend_results_display(placeholder, results):
 def scan_all_stocks(period: str, max_stocks: int = 100):
     """批量扫描所有A股（实时更新）"""
     st.subheader("🔍 A股批量扫描")
+    
+    # 初始化扫描缓存
+    scan_cache = ScanCache()
     
     # 初始化session state
     if 'scan_results' not in st.session_state:
@@ -925,6 +1083,13 @@ def scan_all_stocks(period: str, max_stocks: int = 100):
             if not df_buy.empty:
                 st.success(f"✅ 分析完成！找到 {len(df_buy)} 只具有买入信号的股票")
                 
+                # 保存到文件（供验证程序使用）
+                try:
+                    scan_cache.save_daily_results('signal_analysis', st.session_state.scan_results)
+                    st.info("💾 扫描结果已自动保存到 `scan_results/` 目录")
+                except Exception as e:
+                    st.warning(f"⚠️ 保存结果文件失败: {e}")
+                
                 # 下载按钮（使用UTF-8 BOM编码，确保Excel正确显示中文）
                 csv_bytes = df_buy.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
                 st.download_button(
@@ -1090,14 +1255,21 @@ def main():
             if scan_type == "趋势启动信号":
                 # 趋势启动信号扫描
                 st.info("📊 趋势启动信号：先分析市场环境，然后在强势板块中寻找启动个股")
-                max_stocks = st.slider(
-                    "扫描数量",
-                    min_value=10,
-                    max_value=500,
-                    value=100,
-                    step=10,
-                    help="限制扫描的股票数量"
-                )
+                
+                # 添加"扫描全部"选项
+                scan_all_option = st.checkbox("扫描全部强势板块股票（不限制数量）", value=False, help="勾选后将扫描全部强势板块股票，可能需要较长时间")
+                if scan_all_option:
+                    max_stocks = 0  # 0表示不限制，扫描全部
+                    st.info("💡 将扫描全部强势板块股票，可能需要较长时间")
+                else:
+                    max_stocks = st.slider(
+                        "扫描数量",
+                        min_value=10,
+                        max_value=5000,  # 提高最大值以支持1393只股票
+                        value=100,
+                        step=10,
+                        help="限制扫描的股票数量（最大5000只）"
+                    )
             else:
                 # 技术指标评分扫描
                 scan_option = st.radio(
@@ -1186,6 +1358,15 @@ def main():
                     
                     with col4:
                         st.metric("股票名称", info['name'])
+                    
+                    # 显示数据日期信息
+                    if 'data_date' in info and info['data_date']:
+                        today = datetime.now().strftime('%Y-%m-%d')
+                        data_date = info['data_date']
+                        if data_date == today:
+                            st.success(f"✅ 数据日期：{data_date}（最新交易日）")
+                        else:
+                            st.info(f"ℹ️ 数据日期：{data_date}（当前非交易日，使用最近交易日数据）")
                     
                     st.markdown("---")
                     
