@@ -725,16 +725,24 @@ if st.session_state.market_env:
                         rec_date_dt = pd.to_datetime(rec_date)
                         
                         # 获取所选日期当天的数据（用于当天买入）
+                        # 如果推荐日期不是交易日，找到最近的交易日
                         rec_date_data = df[df['日期'] == rec_date_dt]
                         if rec_date_data.empty:
+                            # 推荐日期不是交易日，找到最近的交易日（推荐日期之前最近的交易日）
                             rec_date_data = df[df['日期'] <= rec_date_dt].sort_values('日期')
                             if rec_date_data.empty:
                                 result['status'] = '无法获取所选日期数据'
                                 return result
                             rec_date_data = rec_date_data.iloc[-1:]
+                            # 更新rec_date_dt为实际的交易日
+                            actual_rec_date = rec_date_data.iloc[0]['日期']
+                        else:
+                            # 推荐日期是交易日
+                            actual_rec_date = rec_date_dt
                         
                         # 找到推荐日期后的所有交易日（按日期排序）
-                        future_dates = df[df['日期'] > rec_date_dt].sort_values('日期')
+                        # 使用实际的交易日日期来筛选后续交易日
+                        future_dates = df[df['日期'] > actual_rec_date].sort_values('日期')
                         
                         if len(future_dates) == 0:
                             result['status'] = '无后续交易日数据'
