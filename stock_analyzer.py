@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Tuple, Optional, List
 import warnings
 import time
+import os
 warnings.filterwarnings('ignore')
 
 # 导入速率限制器
@@ -42,6 +43,26 @@ try:
     AKSHARE_AVAILABLE = True
 except ImportError:
     AKSHARE_AVAILABLE = False
+
+def _add_to_ignored_stocks(symbol: str):
+    """将股票代码添加到忽略列表（退市股票等）"""
+    ignored_file = "ignored_stocks.txt"
+    try:
+        # 读取现有列表
+        ignored_stocks = set()
+        if os.path.exists(ignored_file):
+            with open(ignored_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        ignored_stocks.add(line)
+        
+        # 如果不在列表中，添加
+        if symbol not in ignored_stocks:
+            with open(ignored_file, 'a', encoding='utf-8') as f:
+                f.write(f"{symbol}\n")
+    except Exception as e:
+        print(f"添加股票到忽略列表失败: {e}")
 
 
 def get_stocks_by_sectors(sector_names: List[str]) -> pd.DataFrame:
@@ -84,8 +105,15 @@ def get_stocks_by_sectors(sector_names: List[str]) -> pd.DataFrame:
                                 name = row[col]
                         
                         if code:
+                            code_str = str(code)
+                            # 跳过920和900开头的无效代码
+                            # 920开头：不是标准A股代码，可能是内部标识符或特殊证券代码
+                            # 900开头.SZ：深圳B股，数据源支持不好，容易导致限流
+                            if (code_str.startswith('920') or code_str.startswith('900')) and len(code_str) == 6:
+                                continue
+                            
                             # 添加市场后缀
-                            if str(code).startswith('6'):
+                            if code_str.startswith('6'):
                                 symbol = f"{code}.SS"
                             else:
                                 symbol = f"{code}.SZ"
@@ -146,9 +174,11 @@ def get_all_a_stock_list() -> pd.DataFrame:
         # A股：0、3、6开头（6位数字）- 标准A股代码
         # ETF/基金：15、16、51开头（6位数字）
         # 排除：920开头的无效代码（不是标准A股代码，可能是内部标识符或特殊证券代码）
+        # 排除：900开头.SZ（深圳B股，数据源支持不好，容易导致限流）
         result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$')]
-        # 额外排除920开头的无效代码（双重保险）
+        # 额外排除920和900开头的无效代码（双重保险）
         result = result[~result['code'].astype(str).str.startswith('920')]
+        result = result[~result['code'].astype(str).str.startswith('900')]
         
         return result[['symbol', 'code', 'name']]
     except Exception as e:
@@ -171,9 +201,11 @@ def get_all_a_stock_list() -> pd.DataFrame:
             # A股：0、3、6开头（6位数字）- 标准A股代码
             # ETF/基金：15、16、51开头（6位数字）
             # 排除：920开头的无效代码（不是标准A股代码，可能是内部标识符或特殊证券代码）
+            # 排除：900开头.SZ（深圳B股，数据源支持不好，容易导致限流）
             result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$')]
-            # 额外排除920开头的无效代码（双重保险）
+            # 额外排除920和900开头的无效代码（双重保险）
             result = result[~result['code'].astype(str).str.startswith('920')]
+            result = result[~result['code'].astype(str).str.startswith('900')]
             
             return result[['symbol', 'code', 'name']]
         except Exception as e2:
@@ -441,6 +473,8 @@ class StockAnalyzer:
                     # 数据源管理器已尝试所有可用数据源（akshare -> baostock -> yfinance）
                     # 如果都失败，直接返回False，不再尝试yfinance（避免速率限制）
                     print(f"⚠️ {self.symbol} 所有数据源（akshare/baostock/yfinance）获取失败")
+                    # 自动添加到忽略列表（退市股票等）
+                    _add_to_ignored_stocks(self.symbol)
                     return False
             else:
                 # 如果没有数据源管理器，使用原来的方法

@@ -28,31 +28,45 @@ class ScanCache:
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
     
-    def _get_cache_file_path(self, scan_type: str) -> str:
+    def _get_cache_file_path(self, scan_type: str, date: Optional[str] = None, scan_scope: Optional[str] = None) -> str:
         """
         获取缓存文件路径
         
         Args:
             scan_type: 扫描类型（'signal_analysis' 或 'trend_start_signal'）
+            date: 日期（YYYYMMDD格式），如果为None则使用今天
+            scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
         
         Returns:
             str: 缓存文件路径
         """
-        today = datetime.now().strftime('%Y%m%d')
-        filename = f"{scan_type}_{today}.json"
+        if date is None:
+            date = datetime.now().strftime('%Y%m%d')
+        
+        # 对于 trend_start_signal，根据扫描范围区分文件名
+        if scan_type == 'trend_start_signal' and scan_scope:
+            filename = f"{scan_type}_{scan_scope}_{date}.json"
+        else:
+            filename = f"{scan_type}_{date}.json"
+        
         return os.path.join(self.cache_dir, filename)
     
-    def get_scanned_stocks(self, scan_type: str) -> Set[str]:
+    def get_scanned_stocks(self, scan_type: str, date: Optional[str] = None, scan_scope: Optional[str] = None) -> Set[str]:
         """
-        获取今天已扫描的股票列表
+        获取指定日期已扫描的股票列表
         
         Args:
             scan_type: 扫描类型
+            date: 日期（YYYYMMDD格式），如果为None则使用今天
+            scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
         
         Returns:
             Set[str]: 已扫描的股票代码集合
         """
-        cache_file = self._get_cache_file_path(scan_type)
+        if date is None:
+            date = datetime.now().strftime('%Y%m%d')
+        
+        cache_file = self._get_cache_file_path(scan_type, date, scan_scope)
         
         if not os.path.exists(cache_file):
             return set()
@@ -60,18 +74,54 @@ class ScanCache:
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # 检查是否是今天的缓存
-                if data.get('date') == datetime.now().strftime('%Y%m%d'):
+                # 检查是否是指定日期的缓存
+                if data.get('date') == date:
                     return set(data.get('scanned_stocks', []))
                 else:
-                    # 不是今天的缓存，删除旧文件
+                    # 不是指定日期的缓存，删除旧文件
                     os.remove(cache_file)
                     return set()
         except Exception as e:
             print(f"读取扫描缓存失败: {e}")
             return set()
     
-    def add_scanned_stock(self, scan_type: str, symbol: str, result: Optional[dict] = None):
+    def get_cached_results_from_other_scope(self, scan_type: str, symbol: str, date: Optional[str] = None, other_scope: Optional[str] = None) -> Optional[dict]:
+        """
+        从另一个扫描范围的缓存中获取指定股票的扫描结果
+        
+        Args:
+            scan_type: 扫描类型
+            symbol: 股票代码
+            date: 日期（YYYYMMDD格式），如果为None则使用今天
+            other_scope: 另一个扫描范围（'strong_sectors' 或 'all_stocks'）
+        
+        Returns:
+            dict: 扫描结果，如果不存在则返回None
+        """
+        if date is None:
+            date = datetime.now().strftime('%Y%m%d')
+        
+        if not other_scope:
+            return None
+        
+        cache_file = self._get_cache_file_path(scan_type, date, other_scope)
+        
+        if not os.path.exists(cache_file):
+            return None
+        
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # 检查是否是指定日期的缓存
+                if data.get('date') == date:
+                    results = data.get('results', {})
+                    return results.get(symbol)
+        except Exception as e:
+            print(f"读取其他范围缓存失败: {e}")
+        
+        return None
+    
+    def add_scanned_stock(self, scan_type: str, symbol: str, result: Optional[dict] = None, date: Optional[str] = None, scan_scope: Optional[str] = None):
         """
         添加已扫描的股票
         
@@ -79,8 +129,13 @@ class ScanCache:
             scan_type: 扫描类型
             symbol: 股票代码
             result: 扫描结果（可选，用于保存结果）
+            date: 日期（YYYYMMDD格式），如果为None则使用今天
+            scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
         """
-        cache_file = self._get_cache_file_path(scan_type)
+        if date is None:
+            date = datetime.now().strftime('%Y%m%d')
+        
+        cache_file = self._get_cache_file_path(scan_type, date, scan_scope)
         
         # 读取现有缓存
         if os.path.exists(cache_file):
@@ -88,14 +143,14 @@ class ScanCache:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
             except:
-                data = {'date': datetime.now().strftime('%Y%m%d'), 'scanned_stocks': [], 'results': {}}
+                data = {'date': date, 'scanned_stocks': [], 'results': {}}
         else:
-            data = {'date': datetime.now().strftime('%Y%m%d'), 'scanned_stocks': [], 'results': {}}
+            data = {'date': date, 'scanned_stocks': [], 'results': {}}
         
         # 检查日期
-        if data.get('date') != datetime.now().strftime('%Y%m%d'):
-            # 不是今天的缓存，重新开始
-            data = {'date': datetime.now().strftime('%Y%m%d'), 'scanned_stocks': [], 'results': {}}
+        if data.get('date') != date:
+            # 不是指定日期的缓存，重新开始
+            data = {'date': date, 'scanned_stocks': [], 'results': {}}
         
         # 添加股票代码
         if symbol not in data['scanned_stocks']:
@@ -114,17 +169,18 @@ class ScanCache:
         except Exception as e:
             print(f"保存扫描缓存失败: {e}")
     
-    def get_cached_results(self, scan_type: str) -> list:
+    def get_cached_results(self, scan_type: str, scan_scope: Optional[str] = None) -> list:
         """
         获取今天已扫描的结果
         
         Args:
             scan_type: 扫描类型
+            scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
         
         Returns:
             list: 扫描结果列表
         """
-        cache_file = self._get_cache_file_path(scan_type)
+        cache_file = self._get_cache_file_path(scan_type, scan_scope=scan_scope)
         
         if not os.path.exists(cache_file):
             return []
@@ -155,18 +211,19 @@ class ScanCache:
             except Exception as e:
                 print(f"清除缓存失败: {e}")
     
-    def get_cache_stats(self, scan_type: str) -> dict:
+    def get_cache_stats(self, scan_type: str, scan_scope: Optional[str] = None) -> dict:
         """
         获取缓存统计信息
         
         Args:
             scan_type: 扫描类型
+            scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
         
         Returns:
             dict: 统计信息
         """
-        scanned_stocks = self.get_scanned_stocks(scan_type)
-        cached_results = self.get_cached_results(scan_type)
+        scanned_stocks = self.get_scanned_stocks(scan_type, scan_scope=scan_scope)
+        cached_results = self.get_cached_results(scan_type, scan_scope=scan_scope)
         
         return {
             'scanned_count': len(scanned_stocks),

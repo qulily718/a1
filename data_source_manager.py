@@ -222,18 +222,42 @@ class DataSourceManager:
             ticker = yf.Ticker(symbol)
             df = ticker.history(period=period)
             
-            if df is None or df.empty:
+            # 更严格的None检查，防止NoneType错误
+            if df is None:
+                return None
+            
+            # 检查是否是DataFrame类型
+            if not isinstance(df, pd.DataFrame):
+                return None
+            
+            # 检查是否为空
+            if df.empty:
+                return None
+            
+            # 确保有必要的列，避免后续访问None
+            if len(df.columns) == 0:
                 return None
             
             return df
             
         except Exception as e:
             error_msg = str(e)
+            # 捕获NoneType错误
+            if "'NoneType' object is not subscriptable" in error_msg or "NoneType" in error_msg:
+                # NoneType错误，说明yfinance返回了None或无效数据
+                if 'yfinance' in self.source_stats:
+                    self.source_stats['yfinance']['fail'] += 1
+                return None
+            
             if "Rate limited" in error_msg or "Too Many Requests" in error_msg:
                 # 记录速率限制
                 if 'yfinance' in self.source_stats:
                     self.source_stats['yfinance']['rate_limit'] += 1
                 raise Exception("RATE_LIMIT")
+            
+            # 其他错误也记录失败
+            if 'yfinance' in self.source_stats:
+                self.source_stats['yfinance']['fail'] += 1
             return None
     
     def _period_to_days(self, period: str) -> int:
@@ -246,6 +270,16 @@ class DataSourceManager:
     
     def _standardize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """标准化DataFrame格式"""
+        # 检查df是否为None或无效
+        if df is None:
+            return None
+        
+        if not isinstance(df, pd.DataFrame):
+            return None
+        
+        if df.empty:
+            return df
+        
         # 确保有必要的列
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         for col in required_cols:
