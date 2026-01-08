@@ -386,9 +386,10 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100, scan_all_stocks
     # 第二步：在强势板块中扫描个股
     st.markdown("### 🔍 第二步：扫描趋势启动信号")
     
-    # 初始化实时结果文件路径
+    # 初始化实时结果文件路径（根据扫描范围区分）
     today = datetime.now().strftime('%Y%m%d')
-    realtime_results_file = os.path.join("scan_results", f"trend_start_signal_realtime_{today}.txt")
+    scan_scope_suffix = "all_stocks" if scan_all_stocks else "strong_sectors"
+    realtime_results_file = os.path.join("scan_results", f"trend_start_signal_realtime_{scan_scope_suffix}_{today}.txt")
     os.makedirs("scan_results", exist_ok=True)
     
     # 获取强势板块的股票列表
@@ -558,7 +559,9 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100, scan_all_stocks
         st.metric("待扫描", f"{pending_count} 只", delta=f"{pending_count/total_stocks*100:.1f}%" if total_stocks > 0 else "0%")
     
     # 显示实时结果文件路径
-    st.info(f"💾 扫描结果将实时保存到: `scan_results/trend_start_signal_realtime_{today}.txt`")
+    scan_scope_display = "全部A股" if scan_all_stocks else "强势板块"
+    scan_scope_suffix = "all_stocks" if scan_all_stocks else "strong_sectors"
+    st.info(f"💾 扫描结果将实时保存到: `scan_results/trend_start_signal_realtime_{scan_scope_suffix}_{today}.txt` (扫描范围: {scan_scope_display})")
     
     # 检查是否有被跳过的920开头股票
     skipped_file = os.path.join("scan_results", f"skipped_920_stocks_{today}.txt")

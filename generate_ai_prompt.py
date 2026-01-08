@@ -119,7 +119,7 @@ def calculate_recommendation_strength(stock: Dict) -> float:
     return min(strength, 100)
 
 
-def generate_ai_prompt(stocks: List[Dict], date: str) -> str:
+def generate_ai_prompt(stocks: List[Dict], date: str, scan_scope: str = "强势板块") -> str:
     """
     生成AI操作建议的prompt
     
@@ -148,7 +148,7 @@ def generate_ai_prompt(stocks: List[Dict], date: str) -> str:
 
 ## 背景信息
 
-我使用量化算法扫描了A股市场，发现了 {len(stocks)} 只符合"趋势启动信号"条件的股票。
+我使用量化算法扫描了A股市场（扫描范围：{scan_scope}），发现了 {len(stocks)} 只符合"趋势启动信号"条件的股票。
 这些股票都满足以下技术条件：
 - 价格位于MA10之上，MA5>MA10，MA10斜率向上（趋势向上）
 - 放量上涨（成交量放大）
@@ -260,20 +260,42 @@ def main():
     # 获取今天的日期
     today = datetime.now().strftime('%Y%m%d')
     
-    # 结果文件路径
-    result_file = os.path.join("scan_results", f"trend_start_signal_realtime_{today}.txt")
+    # 尝试自动检测扫描范围（通过查找文件）
+    # 优先查找全部A股的文件，如果不存在则查找强势板块的文件
+    result_file_all = os.path.join("scan_results", f"trend_start_signal_realtime_all_stocks_{today}.txt")
+    result_file_sectors = os.path.join("scan_results", f"trend_start_signal_realtime_strong_sectors_{today}.txt")
     
-    # 如果文件不存在，尝试使用用户指定的日期
-    if not os.path.exists(result_file):
-        print(f"[警告] 今天的文件不存在: {result_file}")
-        print("[提示] 可以手动指定日期，格式：YYYYMMDD")
-        date_input = input("请输入日期（直接回车使用今天）: ").strip()
-        if date_input:
-            today = date_input
-            result_file = os.path.join("scan_results", f"trend_start_signal_realtime_{today}.txt")
+    scan_scope = None
+    scan_scope_name = None
+    result_file = None
+    
+    if os.path.exists(result_file_all):
+        scan_scope = "all_stocks"
+        scan_scope_name = "全部A股"
+        result_file = result_file_all
+        print(f"[自动检测] 找到全部A股扫描结果文件")
+    elif os.path.exists(result_file_sectors):
+        scan_scope = "strong_sectors"
+        scan_scope_name = "强势板块"
+        result_file = result_file_sectors
+        print(f"[自动检测] 找到强势板块扫描结果文件")
+    else:
+        # 如果都不存在，尝试查找旧格式的文件（兼容旧版本）
+        result_file_old = os.path.join("scan_results", f"trend_start_signal_realtime_{today}.txt")
+        if os.path.exists(result_file_old):
+            scan_scope = "strong_sectors"  # 默认假设是强势板块
+            scan_scope_name = "强势板块（旧格式文件）"
+            result_file = result_file_old
+            print(f"[自动检测] 找到旧格式扫描结果文件（假设为强势板块）")
         else:
-            print("[错误] 未指定日期，退出")
+            print(f"[错误] 未找到扫描结果文件")
+            print(f"  尝试查找: {result_file_all}")
+            print(f"  尝试查找: {result_file_sectors}")
+            print(f"  尝试查找: {result_file_old}")
+            print("[提示] 请确保扫描结果文件存在，或手动指定日期")
             return
+    
+    print(f"[确认] 扫描范围: {scan_scope_name}, 文件: {os.path.basename(result_file)}")
     
     # 解析结果文件
     print(f"[读取] 正在读取文件: {result_file}")
@@ -285,10 +307,10 @@ def main():
     
     # 生成prompt
     print("[生成] 正在生成AI操作建议prompt...")
-    prompt = generate_ai_prompt(stocks, today)
+    prompt = generate_ai_prompt(stocks, today, scan_scope_name)
     
-    # 保存prompt到文件
-    prompt_file = os.path.join("scan_results", f"ai_prompt_{today}.txt")
+    # 保存prompt到文件（根据扫描范围区分）
+    prompt_file = os.path.join("scan_results", f"ai_prompt_{scan_scope}_{today}.txt")
     try:
         with open(prompt_file, 'w', encoding='utf-8') as f:
             f.write(prompt)
