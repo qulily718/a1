@@ -257,8 +257,14 @@ def signal_handler(sig, frame):
         st.session_state.stop_requested = True
     sys.exit(0)
 
-def scan_trend_start_signals(period: str, max_stocks: int = 100):
-    """扫描趋势启动信号（3-5日策略）"""
+def scan_trend_start_signals(period: str, max_stocks: int = 100, scan_all_stocks: bool = False):
+    """扫描趋势启动信号（3-5日策略）
+    
+    Args:
+        period: 数据周期
+        max_stocks: 最大扫描数量（0表示不限制）
+        scan_all_stocks: 是否扫描全部A股（True=全盘扫描，False=仅扫描强势板块）
+    """
     st.subheader("🚀 趋势启动信号扫描（3-5日策略）")
     
     # 初始化扫描缓存
@@ -409,82 +415,119 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             'final_passed': 0
         }
     
+    # 检查扫描范围是否改变，如果改变则清除缓存
+    if 'trend_scan_all_stocks' not in st.session_state:
+        st.session_state.trend_scan_all_stocks = scan_all_stocks
+    elif st.session_state.trend_scan_all_stocks != scan_all_stocks:
+        # 扫描范围改变了，清除缓存
+        st.session_state.trend_scan_all_stocks = scan_all_stocks
+        if 'trend_filtered_stocks' in st.session_state:
+            del st.session_state.trend_filtered_stocks
+        if 'trend_total_stocks' in st.session_state:
+            del st.session_state.trend_total_stocks
+    
     # 显示缓存统计信息
     cache_stats = scan_cache.get_cache_stats('trend_start_signal')
     if cache_stats['scanned_count'] > 0:
         st.info(f"📋 今天已扫描 {cache_stats['scanned_count']} 只股票，已缓存 {cache_stats['cached_results_count']} 个结果")
     
-    # 获取强势板块中的股票列表（只在第一次或需要重新获取时）
+    # 获取股票列表（只在第一次或需要重新获取时）
     if 'trend_filtered_stocks' not in st.session_state or st.session_state.trend_filtered_stocks is None or st.session_state.trend_filtered_stocks.empty:
-        with st.spinner("正在获取强势板块中的股票列表..."):
-            # 如果强势板块列表为空，使用全部A股
-            if not strong_sector_names:
-                st.warning("⚠️ 未找到强势板块，将扫描全部A股")
+        if scan_all_stocks:
+            # 全盘扫描：获取全部A股
+            with st.spinner("正在获取全部A股列表..."):
                 filtered_stocks = get_all_a_stock_list()
-            else:
-                # 真正获取强势板块中的股票
-                st.info(f"📊 强势板块：{', '.join(strong_sector_names[:5])}{'...' if len(strong_sector_names) > 5 else ''}")
-                st.info("🔄 正在获取板块成分股，可能需要一些时间...")
-                
-                # 调用函数获取板块成分股
-                filtered_stocks = get_stocks_by_sectors(strong_sector_names)
-                
                 if filtered_stocks.empty:
-                    st.warning("⚠️ 无法获取板块成分股，将使用全部A股作为备选")
+                    st.error("无法获取A股列表，请检查网络连接或稍后重试")
+                    return
+                st.session_state.trend_total_stocks = len(filtered_stocks)
+                st.success(f"✅ 成功获取 {len(filtered_stocks)} 只A股，将进行全盘扫描")
+        else:
+            # 强势板块扫描
+            with st.spinner("正在获取强势板块中的股票列表..."):
+                # 如果强势板块列表为空，使用全部A股
+                if not strong_sector_names:
+                    st.warning("⚠️ 未找到强势板块，将扫描全部A股")
                     filtered_stocks = get_all_a_stock_list()
-                    st.info(f"📋 备选方案：使用全部A股，共 {len(filtered_stocks)} 只")
-                else:
-                    # 先保存原始股票列表（用于统计）
                     st.session_state.trend_total_stocks = len(filtered_stocks)
+                else:
+                    # 真正获取强势板块中的股票
+                    st.info(f"📊 强势板块：{', '.join(strong_sector_names[:5])}{'...' if len(strong_sector_names) > 5 else ''}")
+                    st.info("🔄 正在获取板块成分股，可能需要一些时间...")
                     
-                    # 获取今天已扫描的股票列表
-                    scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
-                    scanned_count = len(scanned_stocks) if scanned_stocks else 0
-                    pending_count = len(filtered_stocks) - scanned_count
+                    # 调用函数获取板块成分股
+                    filtered_stocks = get_stocks_by_sectors(strong_sector_names)
                     
-                    st.success(f"✅ 成功获取 {len(filtered_stocks)} 只强势板块股票")
-                    if scanned_count > 0:
-                        st.info(f"📊 其中 {scanned_count} 只已扫描，{pending_count} 只股票待扫描")
+                    if filtered_stocks.empty:
+                        st.warning("⚠️ 无法获取板块成分股，将使用全部A股作为备选")
+                        filtered_stocks = get_all_a_stock_list()
+                        st.session_state.trend_total_stocks = len(filtered_stocks)
+                        st.info(f"📋 备选方案：使用全部A股，共 {len(filtered_stocks)} 只")
                     else:
-                        st.info(f"📊 全部 {len(filtered_stocks)} 只股票待扫描")
-                    st.info(f"💡 提示：趋势启动信号条件严格，可能只有少数股票符合条件")
-                    
-                    # 显示板块来源信息（用于验证）
-                    with st.expander("🔍 验证：板块股票来源", expanded=False):
-                        st.markdown(f"""
-                        **板块筛选验证：**
-                        - 强势板块数量：{len(strong_sector_names)} 个
-                        - 获取到的股票数量：{len(filtered_stocks)} 只
-                        - 数据来源：`get_stocks_by_sectors()` 函数
-                        - API调用：`ak.stock_board_industry_cons_em()`
+                        # 先保存原始股票列表（用于统计）
+                        st.session_state.trend_total_stocks = len(filtered_stocks)
                         
-                        **说明：** 如果股票数量明显少于全部A股（5000+只），说明确实是在板块中筛选。
-                        如果数量接近全部A股，可能是API调用失败，已回退到全部A股。
-                        """)
-            
-            # 获取今天已扫描的股票列表（在过滤前先统计）
-            scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
-            total_stocks_before_filter = len(filtered_stocks)
-            scanned_count = len(scanned_stocks) if scanned_stocks else 0
-            
-            # 过滤掉已扫描的股票
-            if scanned_stocks:
-                filtered_stocks = filtered_stocks[~filtered_stocks['symbol'].isin(scanned_stocks)]
-            
-            pending_count = len(filtered_stocks)
-            
-            # 限制扫描数量（如果max_stocks > 0，否则扫描全部）
-            if max_stocks > 0 and pending_count > max_stocks:
-                filtered_stocks = filtered_stocks.head(max_stocks)
-                st.info(f"📊 限制扫描数量为 {max_stocks} 只（共 {pending_count} 只待扫描股票）")
+                        # 获取今天已扫描的股票列表
+                        scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+                        scanned_count = len(scanned_stocks) if scanned_stocks else 0
+                        pending_count = len(filtered_stocks) - scanned_count
+                        
+                        st.success(f"✅ 成功获取 {len(filtered_stocks)} 只强势板块股票")
+                        if scanned_count > 0:
+                            st.info(f"📊 其中 {scanned_count} 只已扫描，{pending_count} 只股票待扫描")
+                        else:
+                            st.info(f"📊 全部 {len(filtered_stocks)} 只股票待扫描")
+                        st.info(f"💡 提示：趋势启动信号条件严格，可能只有少数股票符合条件")
+                        
+                        # 显示板块来源信息（用于验证）
+                        with st.expander("🔍 验证：板块股票来源", expanded=False):
+                            st.markdown(f"""
+                            **板块筛选验证：**
+                            - 强势板块数量：{len(strong_sector_names)} 个
+                            - 获取到的股票数量：{len(filtered_stocks)} 只
+                            - 数据来源：`get_stocks_by_sectors()` 函数
+                            - API调用：`ak.stock_board_industry_cons_em()`
+                            
+                            **说明：** 如果股票数量明显少于全部A股（5000+只），说明确实是在板块中筛选。
+                            如果数量接近全部A股，可能是API调用失败，已回退到全部A股。
+                            """)
+        
+        # 获取今天已扫描的股票列表（在过滤前先统计）
+        scanned_stocks = scan_cache.get_scanned_stocks('trend_start_signal')
+        total_stocks_before_filter = len(filtered_stocks)
+        scanned_count = len(scanned_stocks) if scanned_stocks else 0
+        
+        # 确保trend_total_stocks已设置
+        if 'trend_total_stocks' not in st.session_state or st.session_state.trend_total_stocks == 0:
+            st.session_state.trend_total_stocks = total_stocks_before_filter
+        
+        # 过滤掉已扫描的股票
+        if scanned_stocks:
+            filtered_stocks = filtered_stocks[~filtered_stocks['symbol'].isin(scanned_stocks)]
+        
+        pending_count = len(filtered_stocks)
+        
+        # 限制扫描数量（如果max_stocks > 0，否则扫描全部）
+        if max_stocks > 0 and pending_count > max_stocks:
+            filtered_stocks = filtered_stocks.head(max_stocks)
+            if scan_all_stocks:
+                st.info(f"📊 限制扫描数量为 {max_stocks} 只（共 {pending_count} 只待扫描A股）")
             else:
-                if scanned_count > 0:
+                st.info(f"📊 限制扫描数量为 {max_stocks} 只（共 {pending_count} 只待扫描股票）")
+        else:
+            if scanned_count > 0:
+                if scan_all_stocks:
+                    st.info(f"📊 将扫描 {pending_count} 只待扫描A股（共 {total_stocks_before_filter} 只，已扫描 {scanned_count} 只）")
+                else:
                     st.info(f"📊 将扫描 {pending_count} 只待扫描股票（共 {total_stocks_before_filter} 只，已扫描 {scanned_count} 只）")
+            else:
+                if scan_all_stocks:
+                    st.info(f"📊 将扫描全部 {pending_count} 只A股")
                 else:
                     st.info(f"📊 将扫描全部 {pending_count} 只强势板块股票")
-            
-            # 保存到session_state
-            st.session_state.trend_filtered_stocks = filtered_stocks
+        
+        # 保存到session_state
+        st.session_state.trend_filtered_stocks = filtered_stocks
     else:
         # 使用已保存的股票列表
         filtered_stocks = st.session_state.trend_filtered_stocks
@@ -516,6 +559,41 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
     
     # 显示实时结果文件路径
     st.info(f"💾 扫描结果将实时保存到: `scan_results/trend_start_signal_realtime_{today}.txt`")
+    
+    # 检查是否有被跳过的920开头股票
+    skipped_file = os.path.join("scan_results", f"skipped_920_stocks_{today}.txt")
+    if os.path.exists(skipped_file):
+        try:
+            with open(skipped_file, 'r', encoding='utf-8') as f:
+                skipped_lines = f.readlines()
+                if skipped_lines:
+                    skipped_count = len(skipped_lines)
+                    with st.expander(f"⚠️ 已跳过 {skipped_count} 只920开头的无效代码股票（点击查看详情）", expanded=False):
+                        st.markdown("""
+                        **说明：** 这些920开头的代码不是标准A股代码，可能是内部标识符或特殊证券代码。
+                        请根据股票名称在主流股票软件（如东方财富、同花顺）中查询实际的标准A股代码。
+                        """)
+                        # 显示被跳过的股票列表
+                        skipped_data = []
+                        for line in skipped_lines:
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 3:
+                                skipped_data.append({
+                                    '代码': parts[0],
+                                    '原始代码': parts[1],
+                                    '名称': parts[2]
+                                })
+                        if skipped_data:
+                            skipped_df = pd.DataFrame(skipped_data)
+                            st.dataframe(skipped_df, hide_index=True, width='stretch')
+                            st.download_button(
+                                label="📥 下载被跳过的股票列表（TXT）",
+                                data='\n'.join([f"{row['代码']}\t{row['原始代码']}\t{row['名称']}" for row in skipped_data]),
+                                file_name=f"skipped_920_stocks_{today}.txt",
+                                mime="text/plain"
+                            )
+        except Exception as e:
+            pass  # 如果文件不存在或读取失败，静默处理
     
     # 控制按钮
     col_btn1, col_btn2, col_btn3 = st.columns(3)
@@ -576,6 +654,34 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             symbol = row['symbol']
             name = row.get('name', symbol)
             
+            # 跳过920开头的无效代码（不是标准A股代码，可能是内部标识符或特殊证券代码）
+            code = symbol.replace('.SS', '').replace('.SZ', '')
+            if code.startswith('920') and len(code) == 6:
+                # 920开头的无效代码，直接跳过，不尝试获取数据
+                # 记录详细信息到日志和文件，方便后续查询实际编号
+                st.session_state.trend_index = current_index + 1
+                st.session_state.trend_stats['total_scanned'] += 1
+                
+                # 记录到日志
+                log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ⏭️ 跳过无效代码（920开头）: {name} ({symbol}) - 请根据名称查询实际编号"
+                st.session_state.trend_logs.append(log_msg)
+                if len(st.session_state.trend_logs) > 20:
+                    st.session_state.trend_logs = st.session_state.trend_logs[-20:]
+                
+                # 保存到文件，方便后续查询
+                skipped_file = os.path.join("scan_results", f"skipped_920_stocks_{today}.txt")
+                os.makedirs("scan_results", exist_ok=True)
+                try:
+                    with open(skipped_file, 'a', encoding='utf-8') as f:
+                        f.write(f"{symbol}\t{code}\t{name}\n")
+                        f.flush()
+                except Exception as e:
+                    print(f"写入跳过股票文件失败: {e}")
+                
+                time.sleep(0.01)  # 减少延迟
+                st.rerun()
+                return
+            
             # 更新日志
             log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] 正在分析: {name} ({symbol})"
             st.session_state.trend_logs.append(log_msg)
@@ -602,8 +708,22 @@ def scan_trend_start_signals(period: str, max_stocks: int = 100):
             
             # 分析股票（添加小延迟，避免请求过快）
             try:
-                # 在扫描循环中添加延迟，避免请求过快
-                time.sleep(0.02)  # 20毫秒延迟，给API一些缓冲时间
+                # 分批处理策略：每批500只股票后，增加额外延迟
+                batch_size = 500
+                current_batch = (st.session_state.trend_stats['total_scanned'] // batch_size) + 1
+                
+                # 基础延迟：20毫秒
+                base_delay = 0.02
+                
+                # 每批结束后，增加额外延迟（避免长时间运行后的限流）
+                if st.session_state.trend_stats['total_scanned'] > 0 and st.session_state.trend_stats['total_scanned'] % batch_size == 0:
+                    # 每500只股票后，休息1秒
+                    time.sleep(1.0)
+                    log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ⏸️ 已扫描 {st.session_state.trend_stats['total_scanned']} 只股票，批次 {current_batch} 完成，休息1秒..."
+                    st.session_state.trend_logs.append(log_msg)
+                else:
+                    # 正常延迟：20毫秒
+                    time.sleep(base_delay)
                 
                 analyzer = StockAnalyzer(symbol, period)
                 if analyzer.fetch_data():
@@ -915,6 +1035,42 @@ def scan_all_stocks(period: str, max_stocks: int = 100):
     
     st.markdown("---")
     
+    # 检查是否有被跳过的920开头股票（在扫描前显示）
+    today_scan = datetime.now().strftime('%Y%m%d')
+    skipped_file_scan = os.path.join("scan_results", f"skipped_920_stocks_{today_scan}.txt")
+    if os.path.exists(skipped_file_scan):
+        try:
+            with open(skipped_file_scan, 'r', encoding='utf-8') as f:
+                skipped_lines = [line.strip() for line in f.readlines() if line.strip()]
+                if skipped_lines:
+                    skipped_count = len(skipped_lines)
+                    with st.expander(f"⚠️ 已跳过 {skipped_count} 只920开头的无效代码股票（点击查看详情）", expanded=False):
+                        st.markdown("""
+                        **说明：** 这些920开头的代码不是标准A股代码，可能是内部标识符或特殊证券代码。
+                        请根据股票名称在主流股票软件（如东方财富、同花顺）中查询实际的标准A股代码。
+                        """)
+                        # 显示被跳过的股票列表
+                        skipped_data = []
+                        for line in skipped_lines:
+                            parts = line.split('\t')
+                            if len(parts) >= 3:
+                                skipped_data.append({
+                                    '代码': parts[0],
+                                    '原始代码': parts[1],
+                                    '名称': parts[2]
+                                })
+                        if skipped_data:
+                            skipped_df = pd.DataFrame(skipped_data)
+                            st.dataframe(skipped_df, hide_index=True, width='stretch')
+                            st.download_button(
+                                label="📥 下载被跳过的股票列表（TXT）",
+                                data='\n'.join([f"{row['代码']}\t{row['原始代码']}\t{row['名称']}" for row in skipped_data]),
+                                file_name=f"skipped_920_stocks_{today_scan}.txt",
+                                mime="text/plain"
+                            )
+        except Exception as e:
+            pass  # 如果文件不存在或读取失败，静默处理
+    
     # 创建两列布局：左侧结果，右侧日志
     col1, col2 = st.columns([2, 1])
     
@@ -944,6 +1100,34 @@ def scan_all_stocks(period: str, max_stocks: int = 100):
             row = stock_list.iloc[current_index]
             symbol = row['symbol']
             name = row.get('name', symbol)
+            
+            # 跳过920开头的无效代码（不是标准A股代码，可能是内部标识符或特殊证券代码）
+            code = symbol.replace('.SS', '').replace('.SZ', '')
+            if code.startswith('920') and len(code) == 6:
+                # 920开头的无效代码，直接跳过，不尝试获取数据
+                # 记录详细信息到日志和文件，方便后续查询实际编号
+                st.session_state.current_scan_index += 1
+                
+                # 记录到日志
+                log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ⏭️ 跳过无效代码（920开头）: {name} ({symbol}) - 请根据名称查询实际编号"
+                st.session_state.scan_logs.append(log_msg)
+                if len(st.session_state.scan_logs) > 20:
+                    st.session_state.scan_logs = st.session_state.scan_logs[-20:]
+                
+                # 保存到文件，方便后续查询
+                today_scan = datetime.now().strftime('%Y%m%d')
+                skipped_file_scan = os.path.join("scan_results", f"skipped_920_stocks_{today_scan}.txt")
+                os.makedirs("scan_results", exist_ok=True)
+                try:
+                    with open(skipped_file_scan, 'a', encoding='utf-8') as f:
+                        f.write(f"{symbol}\t{code}\t{name}\n")
+                        f.flush()
+                except Exception as e:
+                    print(f"写入跳过股票文件失败: {e}")
+                
+                time.sleep(0.01)  # 减少延迟
+                st.rerun()
+                return
             
             # 更新日志
             log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] 正在分析: {name} ({symbol})"
@@ -978,6 +1162,23 @@ def scan_all_stocks(period: str, max_stocks: int = 100):
                 return
             
             # 分析股票（使用超时控制，避免长时间阻塞）
+            # 分批处理策略：每批500只股票后，增加额外延迟
+            batch_size = 500
+            scanned_count = len(st.session_state.scan_results)
+            current_batch = (scanned_count // batch_size) + 1
+            
+            # 每批结束后，增加额外延迟（避免长时间运行后的限流）
+            if scanned_count > 0 and scanned_count % batch_size == 0:
+                # 每500只股票后，休息1秒
+                time.sleep(1.0)
+                log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] ⏸️ 已扫描 {scanned_count} 只股票，批次 {current_batch} 完成，休息1秒..."
+                st.session_state.scan_logs.append(log_msg)
+                if len(st.session_state.scan_logs) > 20:
+                    st.session_state.scan_logs = st.session_state.scan_logs[-20:]
+            
+            # 基础延迟：50毫秒（避免请求过快）
+            time.sleep(0.05)
+            
             try:
                 analyzer = StockAnalyzer(symbol, period)
                 if analyzer.fetch_data():
@@ -1254,13 +1455,30 @@ def main():
             
             if scan_type == "趋势启动信号":
                 # 趋势启动信号扫描
-                st.info("📊 趋势启动信号：先分析市场环境，然后在强势板块中寻找启动个股")
+                st.info("📊 趋势启动信号：先分析市场环境，然后寻找启动个股")
+                
+                # 添加扫描范围选择
+                scan_scope = st.radio(
+                    "扫描范围",
+                    ["强势板块", "全部A股"],
+                    help="选择扫描范围：强势板块（仅在强势板块中扫描，效率高）或全部A股（全盘扫描，覆盖所有股票）"
+                )
+                
+                scan_all_stocks_flag = (scan_scope == "全部A股")
+                
+                if scan_all_stocks_flag:
+                    st.info("💡 **全盘扫描模式**：将扫描全部A股，不限制在强势板块中，可能需要较长时间")
+                else:
+                    st.info("💡 **强势板块模式**：仅在强势板块中扫描，提高效率")
                 
                 # 添加"扫描全部"选项
-                scan_all_option = st.checkbox("扫描全部强势板块股票（不限制数量）", value=False, help="勾选后将扫描全部强势板块股票，可能需要较长时间")
+                scan_all_option = st.checkbox("扫描全部股票（不限制数量）", value=False, help="勾选后将扫描全部股票，可能需要较长时间")
                 if scan_all_option:
                     max_stocks = 0  # 0表示不限制，扫描全部
-                    st.info("💡 将扫描全部强势板块股票，可能需要较长时间")
+                    if scan_all_stocks_flag:
+                        st.info("💡 将扫描全部A股，可能需要较长时间")
+                    else:
+                        st.info("💡 将扫描全部强势板块股票，可能需要较长时间")
                 else:
                     max_stocks = st.slider(
                         "扫描数量",
@@ -1321,7 +1539,8 @@ def main():
     if mode == "A股批量扫描":
         # scan_type在侧边栏中定义，需要确保可用
         if 'scan_type' in locals() and scan_type == "趋势启动信号":
-            scan_trend_start_signals(period, max_stocks)
+            scan_all_stocks_flag = scan_scope == "全部A股" if 'scan_scope' in locals() else False
+            scan_trend_start_signals(period, max_stocks, scan_all_stocks_flag)
         else:
             scan_all_stocks(period, max_stocks)
     elif symbol:

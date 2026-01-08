@@ -98,9 +98,10 @@ class DataSourceManager:
         try:
             code = symbol.replace('.SS', '').replace('.SZ', '')
             
-            # 检查是否为B股（9开头），akshare对B股支持可能不好
-            if code.startswith('9') and len(code) == 6:
-                # B股可能不支持，返回None让系统尝试其他数据源
+            # 检查是否为B股（9开头或2开头），akshare对B股支持可能不好
+            # 上海B股：9开头，深圳B股：2开头
+            if (code.startswith('9') or code.startswith('2')) and len(code) == 6:
+                # B股可能不支持，返回None让系统尝试其他数据源（baostock）
                 return None
             
             # 计算日期范围
@@ -205,6 +206,12 @@ class DataSourceManager:
             return None
         
         try:
+            # 对于B股（9开头或2开头），优先使用baostock，避免yfinance连接问题
+            code = symbol.replace('.SS', '').replace('.SZ', '')
+            if (code.startswith('9') or code.startswith('2')) and len(code) == 6:
+                # B股，跳过yfinance，避免连接问题
+                return None
+            
             # 检查是否应该使用yfinance（如果速率限制过多，直接跳过，更严格）
             if 'yfinance' in self.source_stats:
                 stats = self.source_stats['yfinance']
@@ -311,6 +318,18 @@ class DataSourceManager:
         # 按优先级顺序尝试（高优先级先尝试）
         for source in available_sources:
             try:
+                # 添加小延迟，避免请求过快
+                # akshare已经有速率限制器，但为了更稳定，也添加小延迟
+                # yfinance需要更长延迟，避免限流
+                if source['name'] == 'yfinance':
+                    time.sleep(0.5)  # yfinance延迟更长
+                elif source['name'] == 'baostock':
+                    time.sleep(0.1)  # baostock中等延迟
+                elif source['name'] == 'akshare':
+                    time.sleep(0.05)  # akshare已有速率限制器，小延迟即可
+                else:
+                    time.sleep(0.1)  # 其他数据源默认延迟
+                
                 df = source['fetch_func'](symbol, period)
                 if df is not None and not df.empty:
                     self.source_stats[source['name']]['success'] += 1

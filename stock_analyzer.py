@@ -142,11 +142,13 @@ def get_all_a_stock_list() -> pd.DataFrame:
         # 添加市场后缀
         result['symbol'] = result['code'].apply(lambda x: f"{x}.SS" if str(x).startswith('6') else f"{x}.SZ")
         
-        # 保留A股、ETF/基金和B股
-        # A股：0、3、6开头（6位数字）
+        # 只保留标准A股、ETF/基金代码，排除无效代码
+        # A股：0、3、6开头（6位数字）- 标准A股代码
         # ETF/基金：15、16、51开头（6位数字）
-        # B股：9开头（6位数字）
-        result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$|^9\d{5}$')]
+        # 排除：920开头的无效代码（不是标准A股代码，可能是内部标识符或特殊证券代码）
+        result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$')]
+        # 额外排除920开头的无效代码（双重保险）
+        result = result[~result['code'].astype(str).str.startswith('920')]
         
         return result[['symbol', 'code', 'name']]
     except Exception as e:
@@ -165,11 +167,13 @@ def get_all_a_stock_list() -> pd.DataFrame:
             
             result['symbol'] = result['code'].apply(lambda x: f"{x}.SS" if str(x).startswith('6') else f"{x}.SZ")
             
-            # 保留A股、ETF/基金和B股
-            # A股：0、3、6开头（6位数字）
+            # 只保留标准A股、ETF/基金代码，排除无效代码
+            # A股：0、3、6开头（6位数字）- 标准A股代码
             # ETF/基金：15、16、51开头（6位数字）
-            # B股：9开头（6位数字）
-            result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$|^9\d{5}$')]
+            # 排除：920开头的无效代码（不是标准A股代码，可能是内部标识符或特殊证券代码）
+            result = result[result['code'].astype(str).str.match(r'^[036]\d{5}$|^1[56]\d{4}$|^51\d{4}$')]
+            # 额外排除920开头的无效代码（双重保险）
+            result = result[~result['code'].astype(str).str.startswith('920')]
             
             return result[['symbol', 'code', 'name']]
         except Exception as e2:
