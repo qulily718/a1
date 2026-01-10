@@ -1,6 +1,7 @@
 """
 数据源管理器
 实现多数据源负载均衡，减少对单一接口的依赖
+支持历史日期查询
 """
 import pandas as pd
 import time
@@ -90,7 +91,39 @@ class DataSourceManager:
         # 按优先级排序
         self.sources.sort(key=lambda x: x['priority'])
     
-    def _fetch_akshare(self, symbol: str, period: str = "1mo") -> Optional[pd.DataFrame]:
+    def _get_end_date(self, end_date: Optional[str] = None) -> datetime:
+        """获取结束日期，如果未指定则使用今天"""
+        if end_date:
+            try:
+                return datetime.strptime(end_date, '%Y-%m-%d')
+            except ValueError:
+                # 如果日期格式错误，使用今天
+                print(f"⚠️ 日期格式错误: {end_date}，使用今天")
+                return datetime.now()
+        else:
+            return datetime.now()
+    
+    def _adjust_to_trading_day(self, date_obj: datetime, symbol: str = None) -> datetime:
+        """
+        调整日期到最近的交易日
+        
+        Args:
+            date_obj: 原始日期
+            symbol: 股票代码（可选，用于确定市场）
+        
+        Returns:
+            datetime: 调整后的日期（最近交易日）
+        """
+        # 简单实现：如果是周末，调整为周五
+        # 更复杂的实现可以调用API检查是否是交易日
+        weekday = date_obj.weekday()
+        if weekday >= 5:  # 5=周六, 6=周日
+            # 调整到上一个周五
+            days_to_subtract = weekday - 4
+            return date_obj - timedelta(days=days_to_subtract)
+        return date_obj
+    
+    def _fetch_akshare(self, symbol: str, period: str = "1mo", end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
         """使用akshare获取数据"""
         if not AKSHARE_AVAILABLE:
             return None
@@ -104,26 +137,41 @@ class DataSourceManager:
                 # B股可能不支持，返回None让系统尝试其他数据源（baostock）
                 return None
             
-            # 计算日期范围
+            # 获取结束日期
+            end_date_obj = self._get_end_date(end_date)
+            end_date_obj = self._adjust_to_trading_day(end_date_obj, symbol)
+            end_date_str = end_date_obj.strftime('%Y%m%d')
+            
+            # 计算开始日期
             days = self._period_to_days(period)
-            end_date = datetime.now().strftime('%Y%m%d')
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+            start_date_obj = end_date_obj - timedelta(days=days)
+            start_date_str = start_date_obj.strftime('%Y%m%d')
             
             # 获取数据
             df = ak.stock_zh_a_hist(symbol=code, period="daily", 
-                                   start_date=start_date, end_date=end_date, adjust="qfq")
+                                   start_date=start_date_str, end_date=end_date_str, adjust="qfq")
             
             if df is None or df.empty:
                 return None
             
             # 转换为标准格式
-            return self._standardize_dataframe(df)
+            df = self._standardize_dataframe(df)
+            
+            # 确保数据按日期排序（升序），最后一行是最新的数据
+            if df is not None and not df.empty:
+                if hasattr(df.index, 'is_monotonic_increasing'):
+                    if not df.index.is_monotonic_increasing:
+                        df = df.sort_index()
+                elif hasattr(df, 'sort_index'):
+                    df = df.sort_index()
+            
+            return df
             
         except Exception as e:
             # 静默处理错误，让系统尝试其他数据源
             return None
     
-    def _fetch_baostock(self, symbol: str, period: str = "1mo") -> Optional[pd.DataFrame]:
+    def _fetch_baostock(self, symbol: str, period: str = "1mo", end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
         """使用baostock获取数据（免费，支持A股和B股）"""
         if not BAOSTOCK_AVAILABLE:
             return None
@@ -147,17 +195,22 @@ class DataSourceManager:
                 else:
                     bs_code = f"sz.{code}"
             
-            # 计算日期范围
+            # 获取结束日期
+            end_date_obj = self._get_end_date(end_date)
+            end_date_obj = self._adjust_to_trading_day(end_date_obj, symbol)
+            end_date_str = end_date_obj.strftime('%Y-%m-%d')
+            
+            # 计算开始日期
             days = self._period_to_days(period)
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            start_date_obj = end_date_obj - timedelta(days=days)
+            start_date_str = start_date_obj.strftime('%Y-%m-%d')
             
             # 获取数据
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 "date,open,high,low,close,volume",
-                start_date=start_date,
-                end_date=end_date,
+                start_date=start_date_str,
+                end_date=end_date_str,
                 frequency="d",
                 adjustflag="2"  # 前复权
             )
@@ -176,6 +229,7 @@ class DataSourceManager:
             df = pd.DataFrame(data_list, columns=rs.fields)
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
+            df = df.sort_index()  # 确保按日期排序
             
             # 转换数据类型
             for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -200,7 +254,7 @@ class DataSourceManager:
             # 静默处理错误，让系统尝试其他数据源
             return None
     
-    def _fetch_yfinance(self, symbol: str, period: str = "1mo") -> Optional[pd.DataFrame]:
+    def _fetch_yfinance(self, symbol: str, period: str = "1mo", end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
         """使用yfinance获取数据（最后备选）"""
         if not YFINANCE_AVAILABLE:
             return None
@@ -220,7 +274,24 @@ class DataSourceManager:
                     return None
             
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period)
+            
+            # 如果指定了结束日期，使用start和end参数
+            if end_date:
+                # 获取结束日期
+                end_date_obj = self._get_end_date(end_date)
+                end_date_obj = self._adjust_to_trading_day(end_date_obj, symbol)
+                end_date_str = end_date_obj.strftime('%Y-%m-%d')
+                
+                # 计算开始日期
+                days = self._period_to_days(period)
+                start_date_obj = end_date_obj - timedelta(days=days)
+                start_date_str = start_date_obj.strftime('%Y-%m-%d')
+                
+                # 使用start和end参数获取历史数据
+                df = ticker.history(start=start_date_str, end=end_date_str)
+            else:
+                # 使用period参数
+                df = ticker.history(period=period)
             
             # 更严格的None检查，防止NoneType错误
             if df is None:
@@ -237,6 +308,13 @@ class DataSourceManager:
             # 确保有必要的列，避免后续访问None
             if len(df.columns) == 0:
                 return None
+            
+            # 确保数据按日期排序（升序），最后一行是最新的数据
+            if hasattr(df.index, 'is_monotonic_increasing'):
+                if not df.index.is_monotonic_increasing:
+                    df = df.sort_index()
+            elif hasattr(df, 'sort_index'):
+                df = df.sort_index()
             
             return df
             
@@ -298,24 +376,34 @@ class DataSourceManager:
         return df
     
     def get_data(self, symbol: str, period: str = "1mo", 
+                 end_date: Optional[str] = None,  # 新增：结束日期参数
                  preferred_source: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
-        获取股票数据（负载均衡）
+        获取股票数据（负载均衡），支持历史日期
         
         Args:
             symbol: 股票代码
             period: 数据周期
+            end_date: 结束日期，格式为 'YYYY-MM-DD'，默认为今天
             preferred_source: 首选数据源（可选）
         
         Returns:
             DataFrame: 股票数据，如果所有数据源都失败则返回None
         """
+        # 验证日期格式（如果提供）
+        if end_date:
+            try:
+                datetime.strptime(end_date, '%Y-%m-%d')
+            except ValueError:
+                print(f"⚠️ 日期格式错误: {end_date}，请使用 'YYYY-MM-DD' 格式")
+                # 重置为None，使用今天
+                end_date = None
         # 如果指定了首选数据源，优先使用
         if preferred_source:
             for source in self.sources:
                 if source['name'] == preferred_source and source['enabled']:
                     try:
-                        df = source['fetch_func'](symbol, period)
+                        df = source['fetch_func'](symbol, period, end_date)
                         if df is not None and not df.empty:
                             self.source_stats[source['name']]['success'] += 1
                             return df
@@ -364,7 +452,7 @@ class DataSourceManager:
                 else:
                     time.sleep(0.1)  # 其他数据源默认延迟
                 
-                df = source['fetch_func'](symbol, period)
+                df = source['fetch_func'](symbol, period, end_date)
                 if df is not None and not df.empty:
                     self.source_stats[source['name']]['success'] += 1
                     return df

@@ -28,7 +28,7 @@ class ScanCache:
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
     
-    def _get_cache_file_path(self, scan_type: str, date: Optional[str] = None, scan_scope: Optional[str] = None) -> str:
+    def _get_cache_file_path(self, scan_type: str, date: Optional[str] = None, scan_scope: Optional[str] = None, period: Optional[str] = None) -> str:
         """
         获取缓存文件路径
         
@@ -36,6 +36,7 @@ class ScanCache:
             scan_type: 扫描类型（'signal_analysis' 或 'trend_start_signal'）
             date: 日期（YYYYMMDD格式），如果为None则使用今天
             scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
+            period: 数据周期（如'1mo', '3mo', '1y'等），如果为None则不区分周期
         
         Returns:
             str: 缓存文件路径
@@ -43,15 +44,25 @@ class ScanCache:
         if date is None:
             date = datetime.now().strftime('%Y%m%d')
         
+        # 对于 signal_analysis，根据扫描范围和period区分文件名（不同period应该使用不同的缓存）
+        if scan_type == 'signal_analysis':
+            if scan_scope and period:
+                filename = f"{scan_type}_{scan_scope}_{period}_{date}.json"
+            elif scan_scope:
+                filename = f"{scan_type}_{scan_scope}_{date}.json"
+            elif period:
+                filename = f"{scan_type}_{period}_{date}.json"
+            else:
+                filename = f"{scan_type}_{date}.json"
         # 对于 trend_start_signal，根据扫描范围区分文件名
-        if scan_type == 'trend_start_signal' and scan_scope:
+        elif scan_type == 'trend_start_signal' and scan_scope:
             filename = f"{scan_type}_{scan_scope}_{date}.json"
         else:
             filename = f"{scan_type}_{date}.json"
         
         return os.path.join(self.cache_dir, filename)
     
-    def get_scanned_stocks(self, scan_type: str, date: Optional[str] = None, scan_scope: Optional[str] = None) -> Set[str]:
+    def get_scanned_stocks(self, scan_type: str, date: Optional[str] = None, scan_scope: Optional[str] = None, period: Optional[str] = None) -> Set[str]:
         """
         获取指定日期已扫描的股票列表
         
@@ -59,6 +70,7 @@ class ScanCache:
             scan_type: 扫描类型
             date: 日期（YYYYMMDD格式），如果为None则使用今天
             scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
+            period: 数据周期（如'1mo', '3mo', '1y'等），如果为None则不区分周期
         
         Returns:
             Set[str]: 已扫描的股票代码集合
@@ -66,7 +78,7 @@ class ScanCache:
         if date is None:
             date = datetime.now().strftime('%Y%m%d')
         
-        cache_file = self._get_cache_file_path(scan_type, date, scan_scope)
+        cache_file = self._get_cache_file_path(scan_type, date=date, scan_scope=scan_scope, period=period)
         
         if not os.path.exists(cache_file):
             return set()
@@ -121,7 +133,7 @@ class ScanCache:
         
         return None
     
-    def add_scanned_stock(self, scan_type: str, symbol: str, result: Optional[dict] = None, date: Optional[str] = None, scan_scope: Optional[str] = None):
+    def add_scanned_stock(self, scan_type: str, symbol: str, result: Optional[dict] = None, date: Optional[str] = None, scan_scope: Optional[str] = None, period: Optional[str] = None):
         """
         添加已扫描的股票
         
@@ -131,11 +143,12 @@ class ScanCache:
             result: 扫描结果（可选，用于保存结果）
             date: 日期（YYYYMMDD格式），如果为None则使用今天
             scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
+            period: 数据周期（如'1mo', '3mo', '1y'等），如果为None则不区分周期
         """
         if date is None:
             date = datetime.now().strftime('%Y%m%d')
         
-        cache_file = self._get_cache_file_path(scan_type, date, scan_scope)
+        cache_file = self._get_cache_file_path(scan_type, date=date, scan_scope=scan_scope, period=period)
         
         # 读取现有缓存
         if os.path.exists(cache_file):
@@ -143,14 +156,17 @@ class ScanCache:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
             except:
-                data = {'date': date, 'scanned_stocks': [], 'results': {}}
+                data = {'date': date, 'period': period, 'scanned_stocks': [], 'results': {}}
         else:
-            data = {'date': date, 'scanned_stocks': [], 'results': {}}
+            data = {'date': date, 'period': period, 'scanned_stocks': [], 'results': {}}
         
-        # 检查日期
+        # 检查日期和period是否匹配
         if data.get('date') != date:
             # 不是指定日期的缓存，重新开始
-            data = {'date': date, 'scanned_stocks': [], 'results': {}}
+            data = {'date': date, 'period': period, 'scanned_stocks': [], 'results': {}}
+        elif period and data.get('period') != period:
+            # period不匹配，重新开始（不同period应该使用不同的数据）
+            data = {'date': date, 'period': period, 'scanned_stocks': [], 'results': {}}
         
         # 添加股票代码
         if symbol not in data['scanned_stocks']:
@@ -164,23 +180,30 @@ class ScanCache:
         
         # 写入文件
         try:
+            # 确保目录存在
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()  # 立即刷新到磁盘，确保数据立即可读
+            # 调试信息：显示生成的文件名
+            if period:
+                print(f"✅ 已保存扫描缓存: {os.path.basename(cache_file)} (period={period})")
         except Exception as e:
-            print(f"保存扫描缓存失败: {e}")
+            print(f"❌ 保存扫描缓存失败: {e}, 文件路径: {cache_file}")
     
-    def get_cached_results(self, scan_type: str, scan_scope: Optional[str] = None) -> list:
+    def get_cached_results(self, scan_type: str, scan_scope: Optional[str] = None, period: Optional[str] = None) -> list:
         """
         获取今天已扫描的结果
         
         Args:
             scan_type: 扫描类型
             scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
+            period: 数据周期（如'1mo', '3mo', '1y'等），如果为None则不区分周期
         
         Returns:
             list: 扫描结果列表
         """
-        cache_file = self._get_cache_file_path(scan_type, scan_scope=scan_scope)
+        cache_file = self._get_cache_file_path(scan_type, scan_scope=scan_scope, period=period)
         
         if not os.path.exists(cache_file):
             return []
@@ -188,7 +211,12 @@ class ScanCache:
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                # 验证日期和period是否匹配
                 if data.get('date') == datetime.now().strftime('%Y%m%d'):
+                    # 如果指定了period，验证period是否匹配
+                    if period and data.get('period') != period:
+                        # period不匹配，返回空列表（不同period应该使用不同的数据）
+                        return []
                     results = data.get('results', {})
                     return list(results.values())
                 else:
@@ -197,14 +225,16 @@ class ScanCache:
             print(f"读取扫描结果失败: {e}")
             return []
     
-    def clear_today_cache(self, scan_type: str):
+    def clear_today_cache(self, scan_type: str, scan_scope: Optional[str] = None, period: Optional[str] = None):
         """
         清除今天的缓存
         
         Args:
             scan_type: 扫描类型
+            scan_scope: 扫描范围（'strong_sectors' 或 'all_stocks'），如果为None则不区分范围
+            period: 数据周期（如'1mo', '3mo', '1y'等），如果为None则不区分周期
         """
-        cache_file = self._get_cache_file_path(scan_type)
+        cache_file = self._get_cache_file_path(scan_type, scan_scope=scan_scope, period=period)
         if os.path.exists(cache_file):
             try:
                 os.remove(cache_file)

@@ -10,7 +10,19 @@ from typing import Dict, Tuple, Optional, List
 import warnings
 import time
 import os
+import logging
 warnings.filterwarnings('ignore')
+
+# 配置日志系统
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('stock_analyzer.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # 导入速率限制器
 try:
@@ -216,16 +228,18 @@ def get_all_a_stock_list() -> pd.DataFrame:
 class StockAnalyzer:
     """股票分析器"""
     
-    def __init__(self, symbol: str, period: str = "1mo"):
+    def __init__(self, symbol: str, period: str = "1y", end_date: Optional[str] = None):
         """
         初始化股票分析器
         
         Args:
             symbol: 股票代码（如 'AAPL', 'TSLA', '000001.SS'）
             period: 数据周期 ('1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max')
+            end_date: 结束日期，格式为 'YYYY-MM-DD'，默认为今天（用于历史分析）
         """
         self.symbol = symbol.upper()
         self.period = period
+        self.end_date = end_date  # 新增：结束日期参数
         self.stock = None
         self.data = None
         
@@ -302,10 +316,24 @@ class StockAnalyzer:
                 # 获取历史数据
                 days = self._convert_period_to_days(self.period)
                 
-                # 使用今天的日期作为end_date（akshare会自动返回最近的交易日数据）
+                # 为了确保有足够的数据计算指标，根据周期适当增加数据长度
+                # 但不要过度增加，避免获取过多数据影响性能
+                if self.period in ['1mo', '3mo']:
+                    days = int(days * 1.5)  # 中线周期，获取1.5倍数据（优化：从2倍降到1.5倍）
+                elif self.period in ['6mo', '1y']:
+                    days = int(days * 1.2)  # 长线周期，获取1.2倍数据（优化：从1.5倍降到1.2倍）
+                elif self.period in ['2y', '5y']:
+                    days = int(days * 1.1)  # 超长线周期，获取1.1倍数据（优化：从1.2倍降到1.1倍）
+                # 短线周期（1d, 5d）不需要额外增加，因为数据量已经足够
+                
+                # 使用指定的end_date或今天的日期（akshare会自动返回最近的交易日数据）
                 # 如果今天是周末或节假日，akshare会返回上一个交易日的数据
-                end_date = datetime.now().strftime('%Y%m%d')
-                start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+                if self.end_date:
+                    end_date_obj = datetime.strptime(self.end_date, '%Y-%m-%d')
+                else:
+                    end_date_obj = datetime.now()
+                end_date = end_date_obj.strftime('%Y%m%d')
+                start_date = (end_date_obj - timedelta(days=days)).strftime('%Y%m%d')
                 
                 # 使用akshare获取数据（会自动获取到最新的交易日数据）
                 df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
@@ -463,7 +491,7 @@ class StockAnalyzer:
                 # 对于A股，优先使用akshare
                 # 对于B股和ETF/基金，不指定首选，让管理器自动选择（B股优先使用baostock）
                 preferred = 'akshare' if is_a_stock else ('baostock' if is_b_stock else None)
-                df = manager.get_data(self.symbol, self.period, preferred_source=preferred)
+                df = manager.get_data(self.symbol, self.period, end_date=self.end_date, preferred_source=preferred)
                 
                 if df is not None and not df.empty:
                     self.data = df
@@ -496,7 +524,16 @@ class StockAnalyzer:
         for attempt in range(max_retries):
             try:
                 self.stock = yf.Ticker(self.symbol)
-                self.data = self.stock.history(period=self.period)
+                # 如果指定了end_date，使用start和end参数
+                if self.end_date:
+                    end_date_obj = datetime.strptime(self.end_date, '%Y-%m-%d')
+                    end_date_str = end_date_obj.strftime('%Y-%m-%d')
+                    days = self._convert_period_to_days(self.period)
+                    start_date_obj = end_date_obj - timedelta(days=days)
+                    start_date_str = start_date_obj.strftime('%Y-%m-%d')
+                    self.data = self.stock.history(start=start_date_str, end=end_date_str)
+                else:
+                    self.data = self.stock.history(period=self.period)
                 
                 if self.data.empty:
                     # 如果yfinance失败且是A股，尝试不同的格式
@@ -513,7 +550,16 @@ class StockAnalyzer:
                         if alt_symbol != self.symbol:
                             try:
                                 self.stock = yf.Ticker(alt_symbol)
-                                self.data = self.stock.history(period=self.period)
+                                # 如果指定了end_date，使用start和end参数
+                                if self.end_date:
+                                    end_date_obj = datetime.strptime(self.end_date, '%Y-%m-%d')
+                                    end_date_str = end_date_obj.strftime('%Y-%m-%d')
+                                    days = self._convert_period_to_days(self.period)
+                                    start_date_obj = end_date_obj - timedelta(days=days)
+                                    start_date_str = start_date_obj.strftime('%Y-%m-%d')
+                                    self.data = self.stock.history(start=start_date_str, end=end_date_str)
+                                else:
+                                    self.data = self.stock.history(period=self.period)
                                 if not self.data.empty:
                                     self.symbol = alt_symbol
                                     return True
@@ -572,10 +618,28 @@ class StockAnalyzer:
             return {}
         
         try:
+            # 确保数据按日期排序（升序），最后一行是最新的数据
+            if not self.data.index.is_monotonic_increasing:
+                self.data = self.data.sort_index()
+            
+            # 获取最后一行（最新日期）的收盘价
+            # 如果使用历史日期查询，这就是历史日期的收盘价
             current_price = self.data['Close'].iloc[-1] if not self.data.empty else 0
             prev_close = self.data['Close'].iloc[-2] if len(self.data) > 1 else current_price
             change = current_price - prev_close
             change_percent = (change / prev_close * 100) if prev_close > 0 else 0
+            
+            # 获取数据日期（最后一行数据的日期）
+            data_date = None
+            if not self.data.empty and hasattr(self.data.index, 'iloc'):
+                try:
+                    data_date = self.data.index[-1]
+                    if isinstance(data_date, pd.Timestamp):
+                        data_date = data_date.strftime('%Y-%m-%d')
+                    elif isinstance(data_date, datetime):
+                        data_date = data_date.strftime('%Y-%m-%d')
+                except:
+                    pass
             
             # 尝试获取股票详细信息
             name = self.symbol
@@ -612,7 +676,9 @@ class StockAnalyzer:
                 'change_percent': round(change_percent, 2),
                 'volume': int(self.data['Volume'].iloc[-1]) if not self.data.empty else 0,
                 'market_cap': market_cap,
-                'currency': currency
+                'currency': currency,
+                'data_date': data_date,  # 新增：数据日期（历史日期查询时显示）
+                'is_historical': self.end_date is not None  # 新增：是否为历史数据
             }
         except Exception as e:
             print(f"获取股票信息失败: {e}")
@@ -620,7 +686,7 @@ class StockAnalyzer:
     
     def calculate_indicators(self) -> pd.DataFrame:
         """
-        计算技术指标
+        计算技术指标（根据周期自适应调整参数）
         
         Returns:
             DataFrame: 包含技术指标的DataFrame
@@ -630,29 +696,63 @@ class StockAnalyzer:
         
         df = self.data.copy()
         
-        # 移动平均线
-        df['MA5'] = df['Close'].rolling(window=5).mean()
-        df['MA10'] = df['Close'].rolling(window=10).mean()
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA50'] = df['Close'].rolling(window=50).mean()
+        # 根据周期调整指标参数
+        if self.period in ['1d', '5d']:
+            # 短线周期
+            ma_windows = [5, 10, 20, 50]
+            rsi_period = 14
+            macd_params = (12, 26, 9)
+            bb_period = 20
+            volume_ma_period = 20
+        elif self.period in ['1mo', '3mo']:
+            # 中线周期
+            ma_windows = [10, 20, 40, 100]
+            rsi_period = 21
+            macd_params = (15, 30, 10)
+            bb_period = 30
+            volume_ma_period = 30
+        else:
+            # 长线周期（6mo, 1y, 2y, 5y等）
+            ma_windows = [20, 50, 100, 200]
+            rsi_period = 28
+            macd_params = (24, 52, 18)
+            bb_period = 50
+            volume_ma_period = 50
+        
+        # 移动平均线（动态命名）
+        df[f'MA{ma_windows[0]}'] = df['Close'].rolling(window=ma_windows[0]).mean()
+        df[f'MA{ma_windows[1]}'] = df['Close'].rolling(window=ma_windows[1]).mean()
+        df[f'MA{ma_windows[2]}'] = df['Close'].rolling(window=ma_windows[2]).mean()
+        df[f'MA{ma_windows[3]}'] = df['Close'].rolling(window=ma_windows[3]).mean()
+        
+        # 为了保持兼容性，也保留原有的MA5, MA10, MA20, MA50列名（使用对应的窗口值）
+        # 如果窗口值匹配，直接使用；否则使用最接近的值
+        for target_ma in [5, 10, 20, 50]:
+            if target_ma in ma_windows:
+                # 窗口值匹配，列已经存在，无需重新赋值
+                pass  # df[f'MA{target_ma}'] 已经通过上面的代码创建了
+            else:
+                # 找到最接近target_ma的窗口值
+                closest = min(ma_windows, key=lambda x: abs(x - target_ma))
+                df[f'MA{target_ma}'] = df[f'MA{closest}']
         
         # RSI (相对强弱指标)
-        df['RSI'] = self._calculate_rsi(df['Close'], period=14)
+        df['RSI'] = self._calculate_rsi(df['Close'], period=rsi_period)
         
         # MACD
-        macd_data = self._calculate_macd(df['Close'])
+        macd_data = self._calculate_macd(df['Close'], fast=macd_params[0], slow=macd_params[1], signal=macd_params[2])
         df['MACD'] = macd_data['MACD']
         df['MACD_Signal'] = macd_data['Signal']
         df['MACD_Hist'] = macd_data['Histogram']
         
         # 布林带
-        bollinger = self._calculate_bollinger_bands(df['Close'], period=20)
+        bollinger = self._calculate_bollinger_bands(df['Close'], period=bb_period)
         df['BB_Upper'] = bollinger['Upper']
         df['BB_Middle'] = bollinger['Middle']
         df['BB_Lower'] = bollinger['Lower']
         
         # 成交量移动平均
-        df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
+        df['Volume_MA'] = df['Volume'].rolling(window=volume_ma_period).mean()
         
         return df
     
@@ -692,7 +792,7 @@ class StockAnalyzer:
     
     def generate_signals(self) -> Dict:
         """
-        生成交易信号
+        生成交易信号（根据周期自适应调整阈值）
         
         Returns:
             dict: 包含交易信号和建议的字典
@@ -702,12 +802,54 @@ class StockAnalyzer:
         
         df = self.calculate_indicators()
         
-        if df.empty or len(df) < 50:
-            return {'signal': 'NONE', 'strength': 0, 'reason': '数据不足，无法分析'}
+        # 根据周期调整数据长度要求
+        if self.period in ['1d', '5d']:
+            min_data_length = 30
+        elif self.period in ['1mo', '3mo']:
+            min_data_length = 60
+        else:
+            min_data_length = 100
+        
+        if df.empty or len(df) < min_data_length:
+            return {'signal': 'NONE', 'strength': 0, 'reason': f'数据不足（需要至少{min_data_length}条数据），无法分析'}
+        
+        # 根据周期调整阈值
+        if self.period in ['1d', '5d']:
+            # 短线周期
+            rsi_overbought = 75
+            rsi_oversold = 25
+            rsi_low_threshold = 25  # 低位阈值
+            rsi_high_threshold = 75  # 高位阈值
+            volume_ratio_threshold = 2.0
+            volume_ratio_low = 0.7  # 缩量阈值
+            price_change_threshold = 0.02  # 2%
+        elif self.period in ['1mo', '3mo']:
+            # 中线周期
+            rsi_overbought = 70
+            rsi_oversold = 30
+            rsi_low_threshold = 30
+            rsi_high_threshold = 70
+            volume_ratio_threshold = 1.8
+            volume_ratio_low = 0.75
+            price_change_threshold = 0.05  # 5%
+        else:
+            # 长线周期
+            rsi_overbought = 65
+            rsi_oversold = 35
+            rsi_low_threshold = 35
+            rsi_high_threshold = 65
+            volume_ratio_threshold = 1.5
+            volume_ratio_low = 0.8
+            price_change_threshold = 0.10  # 10%
         
         # 获取最新数据
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else latest
+        
+        # 计算当日涨跌幅（用于涨幅惩罚）
+        current_price = latest['Close']
+        prev_close = prev['Close'] if len(df) > 1 else current_price
+        daily_change_pct = ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
         
         signals = []
         buy_score = 0
@@ -738,19 +880,19 @@ class StockAnalyzer:
                 sell_score += 1
                 signals.append("短期空头排列，趋势向下")
         
-        # 2. RSI信号（改进版：添加背离检测）
+        # 2. RSI信号（周期自适应阈值）
         rsi = latest['RSI']
         if not pd.isna(rsi):
-            if rsi < 30:
+            if rsi < rsi_oversold:
                 buy_score += 3
                 signals.append(f"RSI={rsi:.1f}，超卖区域，可能反弹")
-            elif rsi > 70:
+            elif rsi > rsi_overbought:
                 sell_score += 3
                 signals.append(f"RSI={rsi:.1f}，超买区域，可能回调")
-            elif 30 <= rsi <= 50:
+            elif rsi_low_threshold <= rsi <= 50:
                 buy_score += 1
                 signals.append(f"RSI={rsi:.1f}，处于低位，有上涨空间")
-            elif 50 < rsi <= 70:
+            elif 50 < rsi <= rsi_high_threshold:
                 sell_score += 1
                 signals.append(f"RSI={rsi:.1f}，处于高位，注意风险")
             
@@ -835,27 +977,27 @@ class StockAnalyzer:
                             sell_score += 1
                             signals.append("布林带张口，下跌趋势加速")
         
-        # 5. 成交量信号（改进版：添加量价背离检测）
+        # 5. 成交量信号（周期自适应阈值）
         volume_ratio = latest['Volume'] / latest['Volume_MA'] if latest['Volume_MA'] > 0 else 1
         price_change = current_price - prev['Close']
         price_change_pct = (price_change / prev['Close'] * 100) if prev['Close'] > 0 else 0
         
-        # 放量上涨/下跌
-        if volume_ratio > 1.5:
+        # 放量上涨/下跌（使用周期自适应阈值）
+        if volume_ratio > volume_ratio_threshold:
             if price_change > 0:
                 buy_score += 1
-                signals.append("放量上涨，资金流入")
+                signals.append(f"放量上涨（{volume_ratio:.2f}倍），资金流入")
             elif price_change < 0:
                 sell_score += 1
-                signals.append("放量下跌，资金流出")
+                signals.append(f"放量下跌（{volume_ratio:.2f}倍），资金流出")
         
-        # 量价背离检测
-        if volume_ratio < 0.8:
-            if price_change_pct > 0:
+        # 量价背离检测（使用周期自适应阈值）
+        if volume_ratio < volume_ratio_low:
+            if price_change_pct > price_change_threshold * 100:
                 # 价格上涨但成交量萎缩（上涨动能不足）
                 sell_score += 1
                 signals.append("量价背离：上涨但缩量，动能不足")
-            elif price_change_pct < 0:
+            elif price_change_pct < -price_change_threshold * 100:
                 # 价格下跌但成交量萎缩（抛压减轻）
                 buy_score += 1
                 signals.append("量价背离：下跌但缩量，抛压减轻")
@@ -909,6 +1051,16 @@ class StockAnalyzer:
             strength = int(base_strength * 0.6 + score_factor * 0.4)
             strength = min(strength, 100)
             
+            # 4. 单日涨幅过大惩罚（规避追高风险）
+            if daily_change_pct > 9.5:  # 涨幅超过9.5%
+                strength = int(strength * 0.3)  # 大幅降权至30%
+                signals.append(f"⚠️ 单日涨幅过大({daily_change_pct:.2f}%)，追高风险高")
+            elif daily_change_pct > 7.0:  # 涨幅超过7%
+                strength = int(strength * 0.6)  # 降权至60%
+                signals.append(f"⚠️ 单日涨幅较大({daily_change_pct:.2f}%)，注意追高风险")
+            elif daily_change_pct > 5.0:  # 涨幅超过5%
+                strength = int(strength * 0.8)  # 轻微降权至80%
+            
             reason = " | ".join(signals[:3])
         elif signal_type == 'SELL':
             # 同样的逻辑用于卖出信号
@@ -936,6 +1088,12 @@ class StockAnalyzer:
         else:
             strength_level = "无"
         
+        # 计算止损位（基于ATR或近期低点）
+        stop_loss = self._calculate_stop_loss(df, current_price, signal_type)
+        
+        # 计算仓位建议（基于信号强度和波动率）
+        position_suggestion = self._calculate_position_suggestion(strength, df, current_price)
+        
         return {
             'signal': signal,  # 详细信号：STRONG_BUY, BUY, CAUTIOUS_BUY, HOLD, CAUTIOUS_SELL, SELL, STRONG_SELL
             'signal_type': signal_type if 'signal_type' in locals() else 'HOLD',  # 简化信号：BUY, SELL, HOLD
@@ -945,6 +1103,9 @@ class StockAnalyzer:
             'sell_score': sell_score,
             'net_score': net_score,  # 净分数差值
             'reason': reason,
+            'daily_change_pct': round(daily_change_pct, 2),  # 当日涨跌幅
+            'suggested_stop_loss': stop_loss,  # 建议止损位
+            'position_suggestion': position_suggestion,  # 仓位建议
             'indicators': {
                 'RSI': round(rsi, 2) if not pd.isna(rsi) else None,
                 'MACD': round(macd, 2) if not pd.isna(macd) else None,
@@ -952,3 +1113,703 @@ class StockAnalyzer:
                 'MA20': round(latest['MA20'], 2) if not pd.isna(latest['MA20']) else None,
             }
         }
+    
+    def _calculate_stop_loss(self, df: pd.DataFrame, current_price: float, signal_type: str) -> float:
+        """
+        计算止损位（基于ATR或近期低点）
+        
+        Args:
+            df: 包含技术指标的DataFrame
+            current_price: 当前价格
+            signal_type: 信号类型（BUY/SELL/HOLD）
+        
+        Returns:
+            float: 建议止损位
+        """
+        if df.empty or len(df) < 20:
+            # 数据不足，使用固定百分比止损
+            if signal_type == 'BUY':
+                return round(current_price * 0.95, 2)  # -5%止损
+            else:
+                return current_price
+        
+        latest = df.iloc[-1]
+        
+        if signal_type == 'BUY':
+            # 买入信号的止损位计算
+            # 方法1：基于近期低点（最近20日最低价）
+            recent_low_20d = df['Low'].iloc[-20:].min() if len(df) >= 20 else df['Low'].min()
+            
+            # 方法2：基于MA20支撑位
+            ma20_support = latest['MA20'] if not pd.isna(latest['MA20']) else current_price * 0.95
+            
+            # 方法3：基于ATR（平均真实波幅）计算动态止损
+            # ATR = 最近14日的平均真实波幅
+            if len(df) >= 14:
+                high_low = df['High'] - df['Low']
+                high_close = (df['High'] - df['Close'].shift()).abs()
+                low_close = (df['Low'] - df['Close'].shift()).abs()
+                true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                atr = true_range.iloc[-14:].mean()
+                atr_stop_loss = current_price - (atr * 2)  # 2倍ATR止损
+            else:
+                atr_stop_loss = current_price * 0.95
+            
+            # 方法4：固定百分比止损（-5%）
+            fixed_stop_loss = current_price * 0.95
+            
+            # 取最保守的止损位（最高的止损价，即损失最小）
+            stop_loss = max(recent_low_20d, ma20_support, atr_stop_loss, fixed_stop_loss)
+            
+            # 确保止损位不超过当前价格的-8%（防止止损位设置过远）
+            max_loss_stop = current_price * 0.92
+            stop_loss = min(stop_loss, max_loss_stop)
+            
+            return round(stop_loss, 2)
+        
+        elif signal_type == 'SELL':
+            # 卖出信号的止损位（做空止损，即价格上涨的止损位）
+            recent_high_20d = df['High'].iloc[-20:].max() if len(df) >= 20 else df['High'].max()
+            ma20_resistance = latest['MA20'] if not pd.isna(latest['MA20']) else current_price * 1.05
+            
+            if len(df) >= 14:
+                high_low = df['High'] - df['Low']
+                high_close = (df['High'] - df['Close'].shift()).abs()
+                low_close = (df['Low'] - df['Close'].shift()).abs()
+                true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                atr = true_range.iloc[-14:].mean()
+                atr_stop_loss = current_price + (atr * 2)
+            else:
+                atr_stop_loss = current_price * 1.05
+            
+            fixed_stop_loss = current_price * 1.05
+            stop_loss = min(recent_high_20d, ma20_resistance, atr_stop_loss, fixed_stop_loss)
+            min_profit_stop = current_price * 1.08
+            stop_loss = max(stop_loss, min_profit_stop)
+            
+            return round(stop_loss, 2)
+        
+        else:
+            # HOLD信号，不设置止损位
+            return current_price
+    
+    def _calculate_position_suggestion(self, strength: int, df: pd.DataFrame, current_price: float) -> str:
+        """
+        计算仓位建议（基于信号强度和波动率）
+        
+        Args:
+            strength: 信号强度（0-100）
+            df: 包含技术指标的DataFrame
+            current_price: 当前价格
+        
+        Returns:
+            str: 仓位建议描述
+        """
+        if df.empty or len(df) < 14:
+            # 数据不足，使用保守仓位
+            if strength >= 70:
+                return '轻仓 (3-5%)'
+            elif strength >= 50:
+                return '观察仓 (1-2%)'
+            else:
+                return '不参与'
+        
+        # 计算波动率（基于ATR）
+        if len(df) >= 14:
+            high_low = df['High'] - df['Low']
+            high_close = (df['High'] - df['Close'].shift()).abs()
+            low_close = (df['Low'] - df['Close'].shift()).abs()
+            true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            atr = true_range.iloc[-14:].mean()
+            volatility_ratio = (atr / current_price) * 100 if current_price > 0 else 0
+        else:
+            volatility_ratio = 3.0  # 默认中等波动率
+        
+        # 根据信号强度和波动率计算仓位
+        if strength >= 80 and volatility_ratio < 2.0:
+            # 极强信号 + 低波动率 = 中等仓位
+            return '中等仓位 (7-10%)'
+        elif strength >= 70 and volatility_ratio < 2.5:
+            # 强信号 + 低波动率 = 轻仓
+            return '轻仓 (3-5%)'
+        elif strength >= 60 and volatility_ratio < 3.0:
+            # 中等信号 + 中等波动率 = 观察仓
+            return '观察仓 (1-2%)'
+        elif strength >= 50:
+            # 弱信号 = 观察仓或不参与
+            if volatility_ratio < 3.5:
+                return '观察仓 (1-2%)'
+            else:
+                return '不参与（波动率过高）'
+        else:
+            return '不参与（信号强度不足）'
+    
+    def calculate_predictive_factors(self, sector_stock_list: List[str] = None) -> Dict:
+        """
+        计算用于明日预测的增强因子
+        
+        Args:
+            sector_stock_list: 同板块所有成分股代码列表，用于计算板块共识度（可选）
+        
+        Returns:
+            dict: 包含预测因子的字典
+        """
+        if self.data is None or len(self.data) < 20:
+            return {}
+        
+        latest = self.data.iloc[-1]
+        prev = self.data.iloc[-2] if len(self.data) > 1 else latest
+        
+        factors = {}
+        
+        # 1. 量价齐升质量因子（替代简单放量）
+        # 计算平均价格（典型价格）
+        avg_price = (latest['High'] + latest['Low'] + latest['Close']) / 3
+        volume_ma_20 = self.data['Volume'].rolling(20).mean().iloc[-1] if len(self.data) >= 20 else latest['Volume']
+        volume_ratio = latest['Volume'] / volume_ma_20 if volume_ma_20 > 0 else 1
+        
+        # 量价齐升质量 = 成交量倍数 * 价格相对平均价格的偏离度
+        price_quality = latest['Close'] / avg_price if avg_price > 0 else 1
+        factors['price_volume_quality'] = volume_ratio * price_quality
+        
+        # 2. 价格加速度因子（短期动能是否加速）
+        if len(self.data) >= 5:
+            price_change_5d = (latest['Close'] / self.data['Close'].iloc[-5] - 1) * 100
+        else:
+            price_change_5d = 0
+        
+        if len(self.data) >= 20:
+            price_change_20d = (latest['Close'] / self.data['Close'].iloc[-20] - 1) * 100
+        else:
+            price_change_20d = 0
+        
+        # 加速度 = 短期涨幅 - 中期涨幅（正值表示加速上涨）
+        factors['price_acceleration'] = price_change_5d - price_change_20d
+        
+        # 3. 突破关键位置因子
+        if len(self.data) >= 20:
+            recent_high_20d = self.data['High'].iloc[-20:].max()
+            if latest['Close'] > recent_high_20d:
+                factors['breakout_ratio'] = (latest['Close'] - recent_high_20d) / recent_high_20d * 100
+            else:
+                factors['breakout_ratio'] = 0
+        else:
+            factors['breakout_ratio'] = 0
+        
+        # 4. 波动率稳定性因子（低波动突破更健康）
+        if len(self.data) >= 20:
+            price_changes = self.data['Close'].pct_change().iloc[-20:]
+            factors['volatility_ratio'] = price_changes.std() * 100
+        else:
+            factors['volatility_ratio'] = 0
+        
+        # 5. 相对强度因子（相对于大盘或板块）
+        # 这里先计算相对于自身历史的表现，板块相对强度需要在外部计算
+        if len(self.data) >= 60:
+            # 计算60日相对强度（当前价格相对于60日均价的偏离度）
+            ma60 = self.data['Close'].rolling(60).mean().iloc[-1]
+            factors['relative_strength'] = (latest['Close'] / ma60 - 1) * 100 if ma60 > 0 else 0
+        else:
+            factors['relative_strength'] = 0
+        
+        # 6. 成交量趋势因子（成交量是否持续放大）
+        if len(self.data) >= 10:
+            volume_trend_5d = self.data['Volume'].iloc[-5:].mean()
+            volume_trend_10d = self.data['Volume'].iloc[-10:].mean()
+            if volume_trend_10d > 0:
+                factors['volume_trend'] = (volume_trend_5d / volume_trend_10d - 1) * 100
+            else:
+                factors['volume_trend'] = 0
+        else:
+            factors['volume_trend'] = 0
+        
+        # 7. 价格动量因子（结合RSI和MACD）
+        df = self.calculate_indicators()
+        if not df.empty:
+            latest_indicators = df.iloc[-1]
+            rsi = latest_indicators.get('RSI', 50)
+            macd_hist = latest_indicators.get('MACD_Hist', 0)
+            
+            # RSI动量：RSI在50以上且上升为正值
+            rsi_momentum = (rsi - 50) / 50 * 100 if not pd.isna(rsi) else 0
+            
+            # MACD动量：柱状图的正值表示多头动能
+            macd_momentum = macd_hist * 100 if not pd.isna(macd_hist) else 0
+            
+            # 综合动量
+            factors['price_momentum'] = (rsi_momentum * 0.6 + macd_momentum * 0.4)
+        else:
+            factors['price_momentum'] = 0
+        
+        return factors
+
+
+class PredictiveSignalModel:
+    """
+    基于降维模型的明日操作推荐强度预测器
+    将技术分析信号转化为3-5天短线操作的预测性评分
+    """
+    # 常量定义：涨幅惩罚阈值和系数
+    PRICE_CHANGE_PENALTY_THRESHOLD_1 = 5.0   # 涨幅>5%开始轻微惩罚
+    PRICE_CHANGE_PENALTY_THRESHOLD_2 = 7.0   # 涨幅>7%中等惩罚
+    PRICE_CHANGE_PENALTY_THRESHOLD_3 = 9.5   # 涨幅>9.5%大幅惩罚
+    
+    PRICE_CHANGE_PENALTY_COEFF_1 = 0.8   # 轻微惩罚系数
+    PRICE_CHANGE_PENALTY_COEFF_2 = 0.6   # 中等惩罚系数
+    PRICE_CHANGE_PENALTY_COEFF_3 = 0.3   # 大幅惩罚系数
+    
+    # 波动率阈值
+    VOLATILITY_THRESHOLD_1 = 2.5   # 中等波动率阈值
+    VOLATILITY_THRESHOLD_2 = 3.0   # 高波动率阈值
+    
+    VOLATILITY_PENALTY_COEFF_1 = 0.85  # 中等波动率惩罚
+    VOLATILITY_PENALTY_COEFF_2 = 0.7   # 高波动率惩罚
+    
+    # 卖出信号惩罚系数
+    SELL_SIGNAL_PENALTY_COEFF = 0.3
+    
+    def __init__(self):
+        # 模块权重配置 - 这是策略的核心，需通过回测优化
+        self.weights = {
+            'sector_momentum': 0.35,   # 板块动量（新核心）
+            'price_momentum': 0.30,    # 价格动量
+            'market_risk': 0.20,       # 市场关联
+            'volume_heat': 0.15,       # 资金热度（替代主力资金）
+        }
+    
+    def calculate_sector_consensus(self, sector_codes: List[str], all_signals: Dict, exclude_symbol: Optional[str] = None) -> float:
+        """
+        计算板块信号共识度（改进版：排除个股自身，避免幸存者偏差）
+        
+        Args:
+            sector_codes: 板块成分股代码列表
+            all_signals: 全市场股票今日的信号字典 {code: signal_dict}
+            exclude_symbol: 要排除的股票代码（计算该股票的共识度时，排除自身）
+        
+        Returns:
+            float: 共识度得分 0-1
+        """
+        if not sector_codes:
+            return 0.0
+        
+        buy_signals = 0
+        total_stocks = 0
+        
+        for code in sector_codes:
+            # 排除个股自身，避免幸存者偏差
+            if exclude_symbol and code == exclude_symbol:
+                continue
+                
+            if code in all_signals:
+                signal_dict = all_signals[code]
+                # 检查信号类型
+                signal_type = signal_dict.get('signal_type', '')
+                signal = signal_dict.get('signal', '')
+                
+                # 判断是否为买入信号
+                if signal_type in ['BUY'] or signal in ['STRONG_BUY', 'BUY', 'CAUTIOUS_BUY']:
+                    buy_signals += 1
+                total_stocks += 1
+        
+        # 计算共识度：买入信号占比（排除自身后）
+        consensus = buy_signals / total_stocks if total_stocks > 0 else 0.0
+        return consensus
+    
+    def get_market_trend_score(self) -> float:
+        """
+        获取市场趋势评分（基于沪深300指数）
+        
+        Returns:
+            float: 市场趋势评分 0-1
+        """
+        if not AKSHARE_AVAILABLE:
+            return 0.5  # 默认中性
+        
+        try:
+            # 获取沪深300指数数据（代码：000300）
+            # 使用akshare获取指数历史数据
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')  # 获取60天数据
+            
+            # 获取沪深300指数历史数据
+            df = ak.index_zh_a_hist(symbol="000300", period="daily", start_date=start_date, end_date=end_date)
+            
+            if df is None or df.empty or len(df) < 20:
+                return 0.5  # 数据不足，返回中性
+            
+            # 标准化列名（akshare可能返回不同的列名）
+            df.columns = df.columns.str.strip()
+            
+            # 查找收盘价列
+            close_col = None
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if '收盘' in col_lower or 'close' in col_lower or col_lower == '收盘':
+                    close_col = col
+                    break
+            
+            if close_col is None:
+                return 0.5  # 找不到收盘价列
+            
+            # 计算技术指标
+            df['Close'] = pd.to_numeric(df[close_col], errors='coerce')
+            df = df.dropna(subset=['Close'])
+            
+            if len(df) < 20:
+                return 0.5
+            
+            # 计算20日均线
+            df['MA20'] = df['Close'].rolling(window=20).mean()
+            
+            # 计算MACD
+            ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+            ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+            df['MACD'] = ema12 - ema26
+            df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+            
+            # 获取最新数据
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else latest
+            
+            score = 0.5  # 基础分50分（中性）
+            
+            # 1. 判断是否在20日线上方（权重40%）
+            if not pd.isna(latest['MA20']) and latest['Close'] > latest['MA20']:
+                score += 0.2  # 在均线上方，+20分
+            elif not pd.isna(latest['MA20']) and latest['Close'] < latest['MA20']:
+                score -= 0.2  # 在均线下方，-20分
+            
+            # 2. 判断MACD是否金叉（权重30%）
+            macd = latest['MACD']
+            macd_signal = latest['MACD_Signal']
+            prev_macd = prev['MACD'] if not pd.isna(prev['MACD']) else 0
+            prev_signal = prev['MACD_Signal'] if not pd.isna(prev['MACD_Signal']) else 0
+            
+            if not pd.isna(macd) and not pd.isna(macd_signal):
+                # MACD金叉
+                if macd > macd_signal and prev_macd <= prev_signal:
+                    score += 0.15  # 金叉，+15分
+                # MACD死叉
+                elif macd < macd_signal and prev_macd >= prev_signal:
+                    score -= 0.15  # 死叉，-15分
+                # MACD在零轴上方
+                elif macd > 0:
+                    score += 0.05  # 零轴上方，+5分
+                # MACD在零轴下方
+                elif macd < 0:
+                    score -= 0.05  # 零轴下方，-5分
+            
+            # 3. 判断短期趋势（最近5日涨跌，权重30%）
+            if len(df) >= 5:
+                price_change_5d = (latest['Close'] / df['Close'].iloc[-5] - 1) * 100
+                if price_change_5d > 2:
+                    score += 0.15  # 5日涨幅>2%，+15分
+                elif price_change_5d > 0:
+                    score += 0.05  # 5日涨幅>0%，+5分
+                elif price_change_5d < -2:
+                    score -= 0.15  # 5日跌幅>2%，-15分
+                elif price_change_5d < 0:
+                    score -= 0.05  # 5日跌幅>0%，-5分
+            
+            # 确保分数在0-1之间
+            score = max(0.0, min(1.0, score))
+            
+            return round(score, 2)
+            
+        except Exception as e:
+            print(f"获取市场趋势评分失败: {e}")
+            return 0.5  # 出错时返回中性
+    
+    def generate_recommendation_strength(
+            self,
+            stock_factors: Dict,        # 来自StockAnalyzer的预测因子
+            sector_consensus: float,    # 板块共识度
+            market_trend_score: float,  # 大盘趋势评分
+            stock_signal: Dict         # 原有的技术面信号，作为基础过滤
+        ) -> Dict:
+        """
+        生成最终推荐强度
+        
+        Args:
+            stock_factors: 预测因子字典
+            sector_consensus: 板块共识度 0-1
+            market_trend_score: 市场趋势评分 0-1
+            stock_signal: 技术面信号字典
+        
+        Returns:
+            dict: 包含推荐强度、止损位、仓位建议等
+        """
+        # 1. 各模块打分（改进版：使用分位数归一化，替代固定范围映射）
+        # 板块共识度直接转化
+        sector_score = sector_consensus * 100
+        
+        # 价格加速度：使用分位数归一化（更稳健）
+        price_acceleration = stock_factors.get('price_acceleration', 0)
+        # 假设历史分布：-30到30覆盖95%的情况，使用tanh函数平滑映射
+        price_score = 50 + 50 * np.tanh(price_acceleration / 30)  # 映射到0-100
+        
+        # 市场趋势评分直接转化
+        market_score = market_trend_score * 100
+        
+        # 量价质量：使用对数归一化（更稳健）
+        volume_quality = stock_factors.get('price_volume_quality', 1)
+        # 使用对数映射，避免极端值影响
+        if volume_quality > 0:
+            volume_score = min(100, max(0, 20 * np.log1p(volume_quality - 1) * 10))
+        else:
+            volume_score = 0
+        
+        # 2. 加权计算综合强度
+        total_score = (
+            sector_score * self.weights['sector_momentum'] +
+            price_score * self.weights['price_momentum'] +
+            market_score * self.weights['market_risk'] +
+            volume_score * self.weights['volume_heat']
+        )
+        
+        # 3. 关键过滤规则（硬性风控）
+        original_signal = stock_signal.get('signal', '')
+        original_signal_type = stock_signal.get('signal_type', '')
+        daily_change_pct = stock_signal.get('daily_change_pct', 0)
+        volatility_ratio = stock_factors.get('volatility_ratio', 0)
+        
+        # 规则A：若个股原信号为SELL或STRONG_SELL，大幅降权或直接剔除
+        if original_signal_type in ['SELL'] or original_signal in ['STRONG_SELL', 'SELL', 'CAUTIOUS_SELL']:
+            total_score *= self.SELL_SIGNAL_PENALTY_COEFF
+        
+        # 规则B：单日涨幅过大显著降权，规避追高风险（使用常量）
+        if daily_change_pct > self.PRICE_CHANGE_PENALTY_THRESHOLD_3:
+            total_score *= self.PRICE_CHANGE_PENALTY_COEFF_3
+        elif daily_change_pct > self.PRICE_CHANGE_PENALTY_THRESHOLD_2:
+            total_score *= self.PRICE_CHANGE_PENALTY_COEFF_2
+        elif daily_change_pct > self.PRICE_CHANGE_PENALTY_THRESHOLD_1:
+            total_score *= self.PRICE_CHANGE_PENALTY_COEFF_1
+        
+        # 规则C：波动率过高降权，追求"稳健"（使用常量）
+        if volatility_ratio > self.VOLATILITY_THRESHOLD_2:
+            total_score *= self.VOLATILITY_PENALTY_COEFF_2
+        elif volatility_ratio > self.VOLATILITY_THRESHOLD_1:
+            total_score *= self.VOLATILITY_PENALTY_COEFF_1
+        
+        # 确保分数在0-100范围内
+        total_score = max(0, min(100, total_score))
+        
+        # 4. 计算止损位（整合风险调整，传递market_trend_score）
+        stop_loss, stop_loss_type = self._calculate_stop_loss(
+            stock_factors, stock_signal, market_trend_score
+        )
+        
+        # 5. 生成最终操作建议
+        recommendation = {
+            'final_score': round(total_score, 1),
+            'score_breakdown': {
+                'sector': round(sector_score, 1),
+                'price': round(price_score, 1),
+                'market': round(market_score, 1),
+                'volume': round(volume_score, 1)
+            },
+            'recommendation': self._score_to_action(total_score),
+            'stop_loss': stop_loss,
+            'stop_loss_type': stop_loss_type,
+            'time_stop_loss': '3日不涨即平仓',  # 时间止损建议
+            'position_suggestion': self._calculate_position(total_score, volatility_ratio),
+            # 增强返回值：添加原始信号信息
+            'original_signal': original_signal,
+            'original_signal_type': original_signal_type,
+            'original_reason': stock_signal.get('reason', '')
+        }
+        return recommendation
+    
+    def _score_to_action(self, score: float) -> str:
+        """将分数转化为操作建议"""
+        if score >= 75:
+            return '强力买入'
+        elif score >= 60:
+            return '买入'
+        elif score >= 50:
+            return '谨慎买入'
+        elif score >= 40:
+            return '观望'
+        else:
+            return '规避'
+    
+    def _calculate_stop_loss(self, factors: Dict, signal: Dict, market_trend_score: float = 0.5) -> Tuple[float, str]:
+        """
+        基于预测因子和信号计算动态止损位（改进版：整合风险调整系数和时间止损）
+        
+        Args:
+            factors: 预测因子字典
+            signal: 技术面信号字典
+            market_trend_score: 市场趋势评分（用于风险调整）
+        
+        Returns:
+            Tuple[float, str]: (止损位, 止损类型说明)
+        """
+        current_price = signal.get('current_price', 0)
+        if current_price == 0:
+            current_price = signal.get('price', 0)
+        
+        if current_price == 0:
+            return 0.0, "价格无效"
+        
+        # 使用信号中已有的止损位作为基础
+        suggested_stop_loss = signal.get('suggested_stop_loss', 0)
+        base_stop_loss = suggested_stop_loss if suggested_stop_loss > 0 else current_price * 0.95
+        
+        # 风险调整系数：根据市场趋势和波动率调整
+        volatility_ratio = factors.get('volatility_ratio', 2.0)
+        risk_adjustment = 1.0
+        
+        # 市场趋势差时，止损更紧
+        if market_trend_score < 0.4:
+            risk_adjustment *= 0.95  # 市场差，止损收紧5%
+        
+        # 波动率大时，止损更紧
+        if volatility_ratio > 3.0:
+            risk_adjustment *= 0.93  # 高波动，止损收紧7%
+        elif volatility_ratio > 2.5:
+            risk_adjustment *= 0.96  # 中高波动，止损收紧4%
+        
+        # 应用风险调整
+        adjusted_stop_loss = base_stop_loss * risk_adjustment
+        
+        # 确保止损位不超过-8%（防止止损过远）
+        max_loss_stop = current_price * 0.92
+        final_stop_loss = min(adjusted_stop_loss, max_loss_stop)
+        
+        # 生成止损类型说明
+        stop_loss_type = "技术止损"
+        if market_trend_score < 0.4:
+            stop_loss_type += " + 市场风险调整"
+        if volatility_ratio > 2.5:
+            stop_loss_type += " + 波动率调整"
+        
+        return round(final_stop_loss, 2), stop_loss_type
+    
+    def _calculate_position(self, score: float, volatility: float) -> str:
+        """
+        根据评分和波动率建议仓位
+        """
+        if score >= 70 and volatility < 2:
+            return '中等仓位 (7-10%)'
+        elif score >= 60:
+            return '轻仓 (3-5%)'
+        elif score >= 50:
+            return '观察仓 (1-2%)'
+        else:
+            return '观察仓 (1-2%) 或不参与'
+
+
+def scan_sector_and_generate_recommendations(
+    sector_name: str,
+    period: str = '6mo',
+    max_stocks: Optional[int] = None
+) -> List[Dict]:
+    """
+    扫描板块并生成预测性推荐（核心驱动函数）
+    
+    Args:
+        sector_name: 板块名称
+        period: 数据周期，默认6个月（适合短线）
+        max_stocks: 最大扫描股票数，None表示全部
+    
+    Returns:
+        List[Dict]: 按预测评分排序的推荐列表
+    """
+    logger.info(f"🔍 开始扫描板块: {sector_name} (period={period})")
+    
+    # 1. 获取板块成分股列表
+    sector_stocks = get_stocks_by_sectors([sector_name])
+    if sector_stocks.empty:
+        logger.warning(f"⚠️ 板块 {sector_name} 未找到成分股")
+        return []
+    
+    # 限制扫描数量
+    if max_stocks and len(sector_stocks) > max_stocks:
+        sector_stocks = sector_stocks.head(max_stocks)
+        logger.info(f"ℹ️ 限制扫描数量为 {max_stocks} 只")
+    
+    all_signals = {}
+    stock_analyzers = {}
+    
+    # 2. 批量获取成分股的基础技术信号
+    logger.info(f"📊 正在分析 {len(sector_stocks)} 只成分股...")
+    for idx, row in sector_stocks.iterrows():
+        symbol = row['symbol']
+        name = row.get('name', symbol)
+        
+        try:
+            analyzer = StockAnalyzer(symbol, period)
+            if analyzer.fetch_data():
+                signal = analyzer.generate_signals()
+                if signal:
+                    all_signals[symbol] = signal
+                    stock_analyzers[symbol] = analyzer
+                    logger.debug(f"✅ {name} ({symbol}): {signal.get('signal', 'NONE')}")
+                else:
+                    logger.debug(f"⚠️ {name} ({symbol}): 无信号")
+            else:
+                logger.warning(f"❌ {name} ({symbol}): 数据获取失败")
+        except Exception as e:
+            logger.error(f"❌ {name} ({symbol}): 分析失败 - {str(e)[:50]}")
+    
+    if not all_signals:
+        logger.warning(f"⚠️ 板块 {sector_name} 未找到任何有效信号")
+        return []
+    
+    # 3. 计算板块整体共识度（用于日志输出）
+    model = PredictiveSignalModel()
+    sector_codes = list(all_signals.keys())
+    overall_consensus = model.calculate_sector_consensus(sector_codes, all_signals)
+    logger.info(f"📈 板块整体共识度: {overall_consensus:.2%} (包含所有股票)")
+    
+    # 4. 获取市场趋势评分（一次性获取，避免重复调用）
+    market_score = model.get_market_trend_score()
+    logger.info(f"🌐 市场趋势评分: {market_score:.2f}")
+    
+    # 5. 对每只股票进行预测性评分（改进版：排除个股自身计算共识度）
+    recommendations = []
+    logger.info(f"🎯 正在生成预测推荐...")
+    
+    for symbol, analyzer in stock_analyzers.items():
+        try:
+            # 计算该股票的预测因子
+            factors = analyzer.calculate_predictive_factors()
+            
+            # 计算排除该股票自身的板块共识度（避免幸存者偏差）
+            individual_consensus = model.calculate_sector_consensus(
+                sector_codes, all_signals, exclude_symbol=symbol
+            )
+            
+            # 生成最终推荐
+            rec = model.generate_recommendation_strength(
+                stock_factors=factors,
+                sector_consensus=individual_consensus,  # 使用排除自身的共识度
+                market_trend_score=market_score,
+                stock_signal=all_signals[symbol]
+            )
+            
+            # 添加股票基本信息
+            info = analyzer.get_current_info()
+            recommendation = {
+                'symbol': symbol,
+                'name': info.get('name', symbol),
+                'price': info.get('current_price', 0),
+                'change_percent': info.get('change_percent', 0),
+                'sector': sector_name,
+                'sector_consensus': round(individual_consensus, 3),  # 添加板块共识度字段
+                **rec
+            }
+            recommendations.append(recommendation)
+            
+        except Exception as e:
+            logger.warning(f"❌ {symbol} 预测评分失败: {str(e)[:50]}")
+    
+    # 6. 按最终评分排序输出
+    recommendations.sort(key=lambda x: x.get('final_score', 0), reverse=True)
+    
+    logger.info(f"✅ 板块扫描完成，共生成 {len(recommendations)} 个推荐")
+    if recommendations:
+        logger.info(f"📊 预测评分范围: {min(r.get('final_score', 0) for r in recommendations):.1f} - {max(r.get('final_score', 0) for r in recommendations):.1f}")
+    
+    return recommendations
