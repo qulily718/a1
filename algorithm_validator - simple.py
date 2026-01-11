@@ -164,7 +164,7 @@ if st.button("📊 分析推荐股票收益", type="primary"):
     
     # 解析JSON文件的函数
     def parse_json_file(file_path):
-        """解析扫描结果JSON文件"""
+        """解析扫描结果JSON文件，返回完整的股票信息（包括所有评分字段）"""
         recommendations = []
         if not os.path.exists(file_path):
             return recommendations
@@ -177,11 +177,8 @@ if st.button("📊 分析推荐股票收益", type="primary"):
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict) and 'symbol' in item and 'price' in item:
-                        recommendations.append({
-                            'symbol': item.get('symbol'),
-                            'name': item.get('name', item.get('symbol')),
-                            'price': item.get('price', 0)
-                        })
+                        # 返回完整的item字典，包含所有字段
+                        recommendations.append(item.copy())
             # 如果是字典格式，包含results字段（signal_analysis_all_stocks_*_YYYYMMDD.json）
             elif isinstance(data, dict):
                 if 'results' in data:
@@ -192,18 +189,16 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                             signal_type = item.get('signal_type', '')
                             signal = item.get('signal', '')
                             if signal_type == 'BUY' or signal == 'BUY' or signal in ['STRONG_BUY', 'CAUTIOUS_BUY']:
-                                recommendations.append({
-                                    'symbol': item.get('symbol', symbol),
-                                    'name': item.get('name', symbol),
-                                    'price': item.get('price', 0)
-                                })
+                                # 返回完整的item字典，包含所有字段
+                                stock_info = item.copy()
+                                # 确保symbol字段存在
+                                if 'symbol' not in stock_info:
+                                    stock_info['symbol'] = symbol
+                                recommendations.append(stock_info)
                 # 如果是直接的字典格式（trend_start_signal格式）
                 elif 'symbol' in data and 'price' in data:
-                    recommendations.append({
-                        'symbol': data.get('symbol'),
-                        'name': data.get('name', data.get('symbol')),
-                        'price': data.get('price', 0)
-                    })
+                    # 返回完整的数据字典
+                    recommendations.append(data.copy())
         except Exception as e:
             st.error(f"❌ 解析JSON文件失败: {e}")
         
@@ -211,15 +206,20 @@ if st.button("📊 分析推荐股票收益", type="primary"):
     
     # 查找扫描结果文件的多种方式
     def find_scan_results(date_str):
-        """查找指定日期的扫描结果，支持多种文件格式"""
+        """查找指定日期的扫描结果，支持多种文件格式
+        
+        Returns:
+            tuple: (recommendations, source_file) - 推荐股票列表和来源文件路径
+        """
         recommendations = []
+        source_file = None
         
         # 方式1: 从trend_start_signal_all_stocks_YYYYMMDD.json读取（scan_cache目录）
         json_file1 = os.path.join("scan_cache", f"trend_start_signal_all_stocks_{date_str}.json")
         if os.path.exists(json_file1):
             recommendations = parse_json_file(json_file1)
             if recommendations:
-                return recommendations
+                return recommendations, json_file1
         
         # 方式2: 从signal_analysis_all_stocks_*_YYYYMMDD.json读取（scan_cache目录，支持多个period）
         # 尝试常见的period: 1y, 6mo, 3mo, 1mo, 5y, 2y
@@ -229,23 +229,27 @@ if st.button("📊 分析推荐股票收益", type="primary"):
             if os.path.exists(json_file2):
                 recommendations = parse_json_file(json_file2)
                 if recommendations:
-                    return recommendations
+                    return recommendations, json_file2
         
         # 方式3: 从trend_start_signal_realtime_all_stocks_YYYYMMDD.txt读取（scan_results目录）
         txt_file = os.path.join("scan_results", f"trend_start_signal_realtime_all_stocks_{date_str}.txt")
         if os.path.exists(txt_file):
             recommendations = parse_result_file(txt_file)
             if recommendations:
-                return recommendations
+                return recommendations, txt_file
         
-        return recommendations
+        return recommendations, source_file
     
     # 查找强势板块的推荐股票（暂时保留，虽然appSimple.py不再生成）
     strong_sectors_file = os.path.join("scan_results", f"trend_start_signal_realtime_strong_sectors_{date_str}.txt")
-    strong_sectors_recommendations = parse_result_file(strong_sectors_file)
+    strong_sectors_recommendations = []
+    strong_sectors_source_file = None
+    if os.path.exists(strong_sectors_file):
+        strong_sectors_recommendations = parse_result_file(strong_sectors_file)
+        strong_sectors_source_file = strong_sectors_file
     
     # 查找全盘A股的推荐股票（使用新的查找逻辑）
-    all_stocks_recommendations = find_scan_results(date_str)
+    all_stocks_recommendations, all_stocks_source_file = find_scan_results(date_str)
     
     if not strong_sectors_recommendations and not all_stocks_recommendations:
         st.warning(f"⚠️ 未找到 {date_str} 的扫描结果文件，请先进行扫描")
@@ -282,7 +286,7 @@ if st.button("📊 分析推荐股票收益", type="primary"):
             
             # 定义一个函数来分析单只股票的收益
             def analyze_stock_return(stock, source_type):
-                """分析单只股票的收益"""
+                """分析单只股票的收益，并保留所有评分字段"""
                 symbol = stock['symbol']
                 name = stock.get('name', symbol)
                 source = stock.get('source', source_type)
@@ -309,6 +313,21 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                     't5_close': None,
                     'status': '未知'
                 }
+                
+                # 从stock字典中提取所有评分字段
+                score_fields = [
+                    'signal', 'signal_type', 'strength', 'strength_level',
+                    'buy_score', 'sell_score', 'net_score', 'reason',
+                    'predictive_score', 'predictive_recommendation',
+                    'predictive_stop_loss', 'predictive_stop_loss_type',
+                    'predictive_time_stop', 'predictive_position',
+                    'original_signal', 'original_reason',
+                    'suggested_stop_loss', 'position_suggestion'
+                ]
+                
+                for field in score_fields:
+                    if field in stock:
+                        result[field] = stock[field]
                 
                 try:
                     # 获取推荐日期后的价格数据
@@ -520,14 +539,30 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                 if analysis_results:
                     df_strong = pd.DataFrame(analysis_results)
                     st.subheader("📊 强势板块推荐股票收益分析")
+                    # 显示来源文件名
+                    if strong_sectors_source_file:
+                        st.info(f"📁 **数据来源：** `{strong_sectors_source_file}`")
                     # 格式化显示
-                    display_columns = ['symbol', 'name', 'source', 'buy_price', 
-                                      't1_price', 't1_close', 't1_return', 
-                                      't2_price', 't2_close', 't2_return',
-                                      't3_price', 't3_close', 't3_return',
-                                      't4_price', 't4_close', 't4_return',
-                                      't5_price', 't5_close', 't5_return',
-                                      'status']
+                    display_columns = [
+                        'symbol', 'name', 'source',
+                        # 原始信号字段
+                        'signal', 'signal_type', 'strength', 'strength_level',
+                        'buy_score', 'sell_score', 'net_score', 'reason',
+                        # 预测评分字段
+                        'predictive_score', 'predictive_recommendation',
+                        'predictive_stop_loss', 'predictive_stop_loss_type',
+                        'predictive_time_stop', 'predictive_position',
+                        'original_signal', 'original_reason',
+                        'suggested_stop_loss', 'position_suggestion',
+                        # 收益字段
+                        'buy_price', 
+                        't1_price', 't1_close', 't1_return', 
+                        't2_price', 't2_close', 't2_return',
+                        't3_price', 't3_close', 't3_return',
+                        't4_price', 't4_close', 't4_return',
+                        't5_price', 't5_close', 't5_return',
+                        'status'
+                    ]
                     
                     available_columns = [col for col in display_columns if col in df_strong.columns]
                     display_df_strong = df_strong[available_columns].copy()
@@ -537,6 +572,27 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                         'symbol': '股票代码',
                         'name': '股票名称',
                         'source': '来源',
+                        # 原始信号字段
+                        'signal': '信号',
+                        'signal_type': '信号类型',
+                        'strength': '信号强度',
+                        'strength_level': '强度等级',
+                        'buy_score': '买入评分',
+                        'sell_score': '卖出评分',
+                        'net_score': '净评分',
+                        'reason': '原因',
+                        # 预测评分字段
+                        'predictive_score': '预测评分',
+                        'predictive_recommendation': '预测推荐',
+                        'predictive_stop_loss': '预测止损',
+                        'predictive_stop_loss_type': '止损类型',
+                        'predictive_time_stop': '时间止损',
+                        'predictive_position': '预测仓位',
+                        'original_signal': '原始信号',
+                        'original_reason': '原始原因',
+                        'suggested_stop_loss': '建议止损',
+                        'position_suggestion': '仓位建议',
+                        # 收益字段
                         'buy_price': '买入价',
                         't1_price': 'T+1最高价',
                         't1_close': 'T+1收盘',
@@ -558,16 +614,22 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                     display_df_strong.columns = [column_mapping.get(col, col) for col in display_df_strong.columns]
                     
                     # 格式化数值
-                    price_columns = ['买入价', 'T+1最高价', 'T+1收盘', 'T+2最高价', 'T+2收盘', 'T+3最高价', 'T+3收盘', 'T+4最高价', 'T+4收盘', 'T+5最高价', 'T+5收盘']
+                    price_columns = ['买入价', 'T+1最高价', 'T+1收盘', 'T+2最高价', 'T+2收盘', 'T+3最高价', 'T+3收盘', 'T+4最高价', 'T+4收盘', 'T+5最高价', 'T+5收盘', 
+                                   '预测止损', '建议止损']
                     return_columns = ['T+1收益率(%)', 'T+2收益率(%)', 'T+3收益率(%)', 'T+4收益率(%)', 'T+5收益率(%)']
+                    score_columns = ['信号强度', '买入评分', '卖出评分', '净评分', '预测评分']
                     
                     for col in price_columns:
                         if col in display_df_strong.columns:
-                            display_df_strong[col] = display_df_strong[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) and x != 'N/A' else "N/A")
+                            display_df_strong[col] = display_df_strong[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) and isinstance(x, (int, float)) else (str(x) if pd.notna(x) else "N/A"))
                     
                     for col in return_columns:
                         if col in display_df_strong.columns:
-                            display_df_strong[col] = display_df_strong[col].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) and x != 'N/A' else "N/A")
+                            display_df_strong[col] = display_df_strong[col].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) and isinstance(x, (int, float)) else (str(x) if pd.notna(x) else "N/A"))
+                    
+                    for col in score_columns:
+                        if col in display_df_strong.columns:
+                            display_df_strong[col] = display_df_strong[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) and isinstance(x, (int, float)) else (str(x) if pd.notna(x) else "N/A"))
                     
                     # 标记强势板块股票（在股票名称前添加标记）
                     if '股票名称' in display_df_strong.columns:
@@ -602,17 +664,39 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                 if analysis_results:
                     st.subheader("📊 完整收益分析结果（强势板块 + 全盘A股）")
                     
+                    # 显示来源文件名
+                    source_files = []
+                    if strong_sectors_source_file:
+                        source_files.append(f"强势板块: `{strong_sectors_source_file}`")
+                    if all_stocks_source_file:
+                        source_files.append(f"全盘A股: `{all_stocks_source_file}`")
+                    if source_files:
+                        st.info(f"📁 **数据来源：** {' | '.join(source_files)}")
+                    
                     # 格式化显示完整结果
                     df_all = pd.DataFrame(analysis_results)
                     
-                    # 显示所有列（包括T+4和T+5）
-                    display_columns = ['symbol', 'name', 'source', 'buy_price', 
-                                      't1_price', 't1_close', 't1_return', 
-                                      't2_price', 't2_close', 't2_return', 
-                                      't3_price', 't3_close', 't3_return',
-                                      't4_price', 't4_close', 't4_return',
-                                      't5_price', 't5_close', 't5_return',
-                                      'status']
+                    # 显示所有列（包括评分字段和T+4、T+5）
+                    display_columns = [
+                        'symbol', 'name', 'source',
+                        # 原始信号字段
+                        'signal', 'signal_type', 'strength', 'strength_level',
+                        'buy_score', 'sell_score', 'net_score', 'reason',
+                        # 预测评分字段
+                        'predictive_score', 'predictive_recommendation',
+                        'predictive_stop_loss', 'predictive_stop_loss_type',
+                        'predictive_time_stop', 'predictive_position',
+                        'original_signal', 'original_reason',
+                        'suggested_stop_loss', 'position_suggestion',
+                        # 收益字段
+                        'buy_price', 
+                        't1_price', 't1_close', 't1_return', 
+                        't2_price', 't2_close', 't2_return', 
+                        't3_price', 't3_close', 't3_return',
+                        't4_price', 't4_close', 't4_return',
+                        't5_price', 't5_close', 't5_return',
+                        'status'
+                    ]
                     
                     available_columns = [col for col in display_columns if col in df_all.columns]
                     display_df_all = df_all[available_columns].copy()
@@ -622,6 +706,27 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                         'symbol': '股票代码',
                         'name': '股票名称',
                         'source': '来源',
+                        # 原始信号字段
+                        'signal': '信号',
+                        'signal_type': '信号类型',
+                        'strength': '信号强度',
+                        'strength_level': '强度等级',
+                        'buy_score': '买入评分',
+                        'sell_score': '卖出评分',
+                        'net_score': '净评分',
+                        'reason': '原因',
+                        # 预测评分字段
+                        'predictive_score': '预测评分',
+                        'predictive_recommendation': '预测推荐',
+                        'predictive_stop_loss': '预测止损',
+                        'predictive_stop_loss_type': '止损类型',
+                        'predictive_time_stop': '时间止损',
+                        'predictive_position': '预测仓位',
+                        'original_signal': '原始信号',
+                        'original_reason': '原始原因',
+                        'suggested_stop_loss': '建议止损',
+                        'position_suggestion': '仓位建议',
+                        # 收益字段
                         'buy_price': '买入价',
                         't1_price': 'T+1最高价',
                         't1_close': 'T+1收盘',
@@ -643,16 +748,22 @@ if st.button("📊 分析推荐股票收益", type="primary"):
                     display_df_all.columns = [column_mapping.get(col, col) for col in display_df_all.columns]
                     
                     # 格式化数值
-                    price_columns = ['买入价', 'T+1最高价', 'T+1收盘', 'T+2最高价', 'T+2收盘', 'T+3最高价', 'T+3收盘', 'T+4最高价', 'T+4收盘', 'T+5最高价', 'T+5收盘']
+                    price_columns = ['买入价', 'T+1最高价', 'T+1收盘', 'T+2最高价', 'T+2收盘', 'T+3最高价', 'T+3收盘', 'T+4最高价', 'T+4收盘', 'T+5最高价', 'T+5收盘', 
+                                   '预测止损', '建议止损']
                     return_columns = ['T+1收益率(%)', 'T+2收益率(%)', 'T+3收益率(%)', 'T+4收益率(%)', 'T+5收益率(%)']
+                    score_columns = ['信号强度', '买入评分', '卖出评分', '净评分', '预测评分']
                     
                     for col in price_columns:
                         if col in display_df_all.columns:
-                            display_df_all[col] = display_df_all[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) and x != 'N/A' else "N/A")
+                            display_df_all[col] = display_df_all[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) and isinstance(x, (int, float)) else (str(x) if pd.notna(x) else "N/A"))
                     
                     for col in return_columns:
                         if col in display_df_all.columns:
-                            display_df_all[col] = display_df_all[col].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) and x != 'N/A' else "N/A")
+                            display_df_all[col] = display_df_all[col].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) and isinstance(x, (int, float)) else (str(x) if pd.notna(x) else "N/A"))
+                    
+                    for col in score_columns:
+                        if col in display_df_all.columns:
+                            display_df_all[col] = display_df_all[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) and isinstance(x, (int, float)) else (str(x) if pd.notna(x) else "N/A"))
                     
                     # 标记强势板块股票（在股票名称前添加标记）
                     if '股票名称' in display_df_all.columns:
